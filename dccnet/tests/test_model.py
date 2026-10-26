@@ -31,7 +31,7 @@ def test_shapes_and_ranges_640(model):
     assert out["offset"].shape == (1, 2, 160, 160)
     assert out["density"].shape == (1, 3, 160, 160)
     assert out["heatmap"].min() >= 1e-4 and out["heatmap"].max() <= 1 - 1e-4
-    assert out["density"].min() >= 0
+    assert out["density"].min() > 0  # softplus: strictly positive, never a dead ReLU
 
 
 def test_density_absent_when_disabled():
@@ -74,6 +74,18 @@ def test_head_init(model):
     assert model.heads["heatmap"].out.bias.allclose(torch.tensor(-2.19))
     assert model.heads["log_r"].out.bias.item() == pytest.approx(2.7725887, abs=1e-5)
     assert model.heads["offset"].out.bias.abs().max() == 0
+    assert model.heads["density"].out.bias.allclose(torch.tensor(-9.0))
+    assert model.heads["density"].out.weight.std().item() == pytest.approx(0.01, rel=0.1)
+
+
+def test_density_softplus_keeps_gradient_for_negative_preactivations():
+    # ReLU heads died on WBC/PLT channels (R17); softplus must pass gradient at bias -9.
+    torch.manual_seed(0)
+    m = DCCellNet(_cfg()).train()
+    out = m(torch.randn(2, 3, 128, 128))
+    out["density"].sum().backward()
+    g = m.heads["density"].out.bias.grad
+    assert g is not None and (g > 0).all()
 
 
 def test_not_implemented():

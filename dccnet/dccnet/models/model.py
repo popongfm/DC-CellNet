@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .backbone import ResNet50Backbone
-from .heads import HEATMAP_BIAS, LOG_R_BIAS, Head
+from .heads import DENSITY_BIAS, HEATMAP_BIAS, LOG_R_BIAS, Head
 from .neck import FPNLite
 
 NUM_CLASSES = 3
@@ -29,7 +29,7 @@ class DCCellNet(nn.Module):
             "offset": Head(NECK_CH, 2, 0.0),
         }
         if mcfg.get("heads", {}).get("density", True):
-            heads["density"] = Head(NECK_CH, NUM_CLASSES, 0.0)
+            heads["density"] = Head(NECK_CH, NUM_CLASSES, DENSITY_BIAS)
         self.heads = nn.ModuleDict(heads)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -43,5 +43,6 @@ class DCCellNet(nn.Module):
             "offset": self.heads["offset"](f).float(),
         }
         if "density" in self.heads:
-            out["density"] = F.relu(self.heads["density"](f).float())
+            # softplus, not ReLU: a ReLU density head lets the count loss drive WBC/PLT channels dead (R17)
+            out["density"] = F.softplus(self.heads["density"](f).float())
         return out

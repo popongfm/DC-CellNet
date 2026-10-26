@@ -52,7 +52,8 @@ def main(argv=None) -> int:
     run_name = args.run_name or f"{args.config.stem}_s{seed}"
     run_dir = args.runs_dir / run_name
     print(f"run dir: {run_dir}  device: {device}", flush=True)
-    summary = fit(cfg, run_dir, device, args.data_root, num_workers=args.num_workers)
+    summary = fit(cfg, run_dir, device, args.data_root, num_workers=args.num_workers,
+                  config_stem=args.config.stem)
     print(f"best epoch {summary['best_epoch']}: val {summary['val']}", flush=True)
     return 0
 

@@ -21,3 +21,5 @@ class Head(nn.Module):
 
 HEATMAP_BIAS = -2.19
 LOG_R_BIAS = math.log(16.0)
+# softplus(-9) ~ 1.2e-4 per cell (~3 per 160x160 map): near-empty start, but never a dead unit (R17)
+DENSITY_BIAS = -9.0

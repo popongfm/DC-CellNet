@@ -7,11 +7,15 @@ Run dir (``fit``) contains exactly: ``config.yaml`` (resolved config), ``git_has
 * Optimizer AdamW(lr=train.lr, weight_decay=1e-4); CosineAnnealingLR(T_max=train.epochs_max),
   stepped once per epoch. AMP (autocast + GradScaler) only on CUDA with ``train.amp``.
 * A step whose ``loss_total`` is non-finite is skipped (no backward / optimizer step), logged as a
-  warning and counted in ``nonfinite_steps``; epoch loss means are over finite steps only.
+  warning and counted in ``nonfinite_steps``; so is a step the GradScaler skipped (inf/NaN grads,
+  seen as a drop in ``scaler.get_scale()``). Epoch loss means are over finite-loss steps. An epoch in
+  which every step was non-finite aborts the run (RuntimeError).
 * Validation every epoch: decode with ``score_thr=0.001``, ``max_dets=1000`` (other decode params from
   ``cfg["decode"]``), records in original image px, ``coco_map`` + ``count_errors`` at
   ``decode.score_thr``. Best checkpoint by val mAP50_95 (ties -> earlier epoch); early stop after
   ``train.patience`` epochs without improvement; at most ``train.epochs_max`` epochs.
+  With a density head, the val metrics also carry per-class total predicted density
+  (``den_count_<cls>``) vs GT density (``gt_count_<cls>``) over the val set.
 """
 from __future__ import annotations
 
@@ -19,6 +23,8 @@ import copy
 import json
 import logging
 import math
+import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -33,6 +39,7 @@ from dccnet.datasets.splits import read_split
 from dccnet.datasets.torch_dataset import CellDataset, collate_fn, unletterbox
 from dccnet.decode import decode
 from dccnet.eval.coco_eval import coco_map
+from dccnet.eval.common import CLASS_NAMES
 from dccnet.eval.counting import count_errors
 from dccnet.eval.export_json import image_key
 from dccnet.losses import compute_losses
@@ -109,7 +116,7 @@ def train_one_epoch(model, loader, optimizer, scaler, cfg: dict, device: torch.d
     model.train()
     amp = _use_amp(cfg, device)
     sums = {k: 0.0 for k in LOSS_KEYS}
-    n_ok = n_bad = 0
+    n_ok = n_bad = n_steps = 0
     for step, (images, targets, _metas) in enumerate(loader):
         images = images.to(device, non_blocking=True)
         targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
@@ -118,21 +125,28 @@ def train_one_epoch(model, loader, optimizer, scaler, cfg: dict, device: torch.d
             outputs = model(images)
         losses = compute_losses(outputs, targets, cfg, epoch)  # outputs are float32
         total = losses["loss_total"]
+        n_steps += 1
         if not torch.isfinite(total):
             n_bad += 1
             log.warning("epoch %d step %d: non-finite loss_total (%s); optimizer step skipped",
                         epoch, step, total.item())
             continue
+        for k in LOSS_KEYS:
+            sums[k] += float(losses[k].detach().item())
+        n_ok += 1
         if scaler is not None:
+            scale_before = scaler.get_scale()
             scaler.scale(total).backward()
             scaler.step(optimizer)
             scaler.update()
+            if scaler.get_scale() < scale_before:  # inf/NaN gradients: GradScaler skipped the step
+                n_bad += 1
+                log.warning("epoch %d step %d: GradScaler skipped the step (non-finite gradients)", epoch, step)
         else:
             total.backward()
             optimizer.step()
-        n_ok += 1
-        for k in LOSS_KEYS:
-            sums[k] += float(losses[k].detach().item())
+    if n_steps and n_bad >= n_steps:
+        raise RuntimeError(f"epoch {epoch}: all {n_steps} steps were non-finite (loss or gradients); aborting")
     out = {k: (sums[k] / n_ok if n_ok else float("nan")) for k in LOSS_KEYS}
     out["nonfinite_steps"] = n_bad
     return out
@@ -172,40 +186,56 @@ def dets_to_records(dets: np.ndarray, meta: dict, key: str) -> list[dict]:
 
 @torch.no_grad()
 def _predict_loader(model, loader: DataLoader, cfg: dict, device: torch.device, data_root: Path,
-                    score_thr: float = PRED_SCORE_THR) -> list[dict]:
+                    score_thr: float = PRED_SCORE_THR) -> tuple[list[dict], dict | None]:
+    """(records, density counts) where density counts = ``{"den_count_<cls>", "gt_count_<cls>"}``
+    summed over the loader (None if the model has no density output)."""
     model.eval()
     amp = _use_amp(cfg, device)
     samples = loader.dataset.samples
     kw = _decode_kwargs(cfg, score_thr)
     records: list[dict] = []
+    den_sum = gt_sum = None
     i = 0
-    for images, _targets, metas in loader:
+    for images, targets, metas in loader:
         with torch.amp.autocast("cuda", enabled=amp):
             out = model(images.to(device, non_blocking=True))
+        if "density" in out:
+            d = out["density"].float().sum(dim=(0, 2, 3)).cpu().double()
+            g = targets["density"].float().sum(dim=(0, 2, 3)).double()
+            den_sum = d if den_sum is None else den_sum + d
+            gt_sum = g if gt_sum is None else gt_sum + g
         dets = decode(out["heatmap"], out["log_r"], out["offset"], out.get("density"), **kw)
         for det, meta in zip(dets, metas):
             sample = samples[i]
             i += 1
             assert Path(meta["image"]) == Path(sample.image_path)
             records.extend(dets_to_records(det, meta, image_key(sample, data_root)))
-    return records
+    counts = None
+    if den_sum is not None:
+        counts = {f"den_count_{c}": float(den_sum[k]) for k, c in enumerate(CLASS_NAMES)}
+        counts.update({f"gt_count_{c}": float(gt_sum[k]) for k, c in enumerate(CLASS_NAMES)})
+    return records, counts
 
 
 def predict_records(model, samples: list[Sample], cfg: dict, device: torch.device, data_root: Path,
                     batch: int = 8, score_thr: float = PRED_SCORE_THR, num_workers: int = 0) -> list[dict]:
     """Evaluator records (unletterboxed, ``score >= score_thr``) for ``samples`` in order."""
     loader = _eval_loader(samples, cfg, batch, num_workers, device.type == "cuda")
-    return _predict_loader(model, loader, cfg, device, Path(data_root), score_thr)
+    return _predict_loader(model, loader, cfg, device, Path(data_root), score_thr)[0]
 
 
 def evaluate_epoch(model, val_loader: DataLoader, cfg: dict, device: torch.device, data_root: Path) -> dict:
-    """``{"mAP50", "mAP50_95", "rbc_count_mae", "per_class", "per_class_50_95"}`` on ``val_loader``."""
+    """``{"mAP50", "mAP50_95", "rbc_count_mae", "per_class", "per_class_50_95"}`` on ``val_loader``,
+    plus ``den_count_<cls>`` / ``gt_count_<cls>`` when the model has a density head."""
     samples = val_loader.dataset.samples
-    recs = _predict_loader(model, val_loader, cfg, device, Path(data_root))
+    recs, counts = _predict_loader(model, val_loader, cfg, device, Path(data_root))
     cm = coco_map(samples, recs, data_root)
     ce = count_errors(samples, recs, float(cfg["decode"]["score_thr"]), data_root)
-    return {"mAP50": cm["mAP50"], "mAP50_95": cm["mAP50_95"], "rbc_count_mae": ce["MAE"]["RBC"],
-            "per_class": cm["per_class"], "per_class_50_95": cm["per_class_50_95"]}
+    out = {"mAP50": cm["mAP50"], "mAP50_95": cm["mAP50_95"], "rbc_count_mae": ce["MAE"]["RBC"],
+           "per_class": cm["per_class"], "per_class_50_95": cm["per_class_50_95"]}
+    if counts is not None:
+        out.update(counts)
+    return out
 
 
 def git_hash() -> str:
@@ -225,11 +255,19 @@ def _json_num(v):
     return v if math.isfinite(v) else None
 
 
-def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_workers: int = 0) -> dict:
+def _save_atomic(obj, path: Path) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
+def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_workers: int = 0,
+        config_stem: str | None = None) -> dict:
     """Train with validation + early stopping; write the run dir; return the summary dict.
 
     The caller seeds RNGs (see ``scripts/train.py``). Refuses to overwrite a run dir that already
-    has ``best.pt`` or ``summary.json``.
+    has ``best.pt`` or ``summary.json``. ``config_stem`` (summary.json) defaults to the run-dir name
+    without a trailing ``_s<seed>``.
     """
     run_dir = Path(run_dir)
     for name in ("best.pt", "summary.json"):
@@ -240,6 +278,11 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
     cfg = copy.deepcopy(cfg)
     tcfg = cfg["train"]
     epochs_max, patience = int(tcfg["epochs_max"]), int(tcfg["patience"])
+    if config_stem is None:
+        config_stem = re.sub(r"_s\d+$", "", run_dir.name)
+    if cfg["decode"].get("density_fill", False):
+        log.warning("decode.density_fill is true, but validation/predict decode at score_thr=%s, so every "
+                    "local max above low_thr is already a peak and density fill is a no-op there", PRED_SCORE_THR)
 
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -265,11 +308,13 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
             improved = stopper.step(val["mAP50_95"], epoch)
             if improved:
                 best_val = val
-                torch.save({"model": model.state_dict(), "config": cfg, "epoch": epoch, "val": val},
-                           run_dir / "best.pt")
+                _save_atomic({"model": model.state_dict(), "config": cfg, "epoch": epoch, "val": val},
+                             run_dir / "best.pt")
             row = {"epoch": epoch, **{k: _json_num(tr[k]) for k in LOSS_KEYS},
                    "val_mAP50": _json_num(val["mAP50"]), "val_mAP50_95": _json_num(val["mAP50_95"]),
-                   "val_rbc_count_mae": _json_num(val["rbc_count_mae"]), "lr": lr,
+                   "val_rbc_count_mae": _json_num(val["rbc_count_mae"]),
+                   **{f"val_{k}": _json_num(v) for k, v in val.items() if k.startswith(("den_count_", "gt_count_"))},
+                   "lr": lr,
                    "nonfinite_steps": tr["nonfinite_steps"],
                    "epoch_time_s": round(time.perf_counter() - t0, 3)}
             mf.write(json.dumps(row) + "\n")
@@ -283,6 +328,7 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
 
     summary = {
         "exp": run_dir.name,
+        "config_stem": config_stem,
         "seed": int(tcfg["seed"]),
         "git_hash": ghash,
         "best_epoch": stopper.best_epoch,

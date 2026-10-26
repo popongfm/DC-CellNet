@@ -156,7 +156,17 @@ def test_density_loss_hand_value():
     pred[0, 0, 0, 0] = 0.5
     pred[0, 1, 1, 1] = 1.0
     mse = (0.25 + 1.0) / 8
-    count = (0.5 + 1.0) / 2
+    count = (0.5 / 1.0 + 1.0 / 1.0) / 2  # |pred-gt| / max(gt, 1); class 1 has gt 0 -> denominator 1
+    assert density_loss(pred, gt).item() == pytest.approx(mse + count, rel=1e-6)
+
+
+def test_density_loss_count_term_normalized_by_gt():
+    gt = torch.zeros(1, 1, 4, 4)
+    gt[0, 0, :2, :2] = 1.0  # sum 4
+    pred = torch.zeros(1, 1, 4, 4)
+    pred[0, 0, 0, :2] = 1.0  # sum 2
+    mse = 2.0 / 16
+    count = abs(2.0 - 4.0) / 4.0
     assert density_loss(pred, gt).item() == pytest.approx(mse + count, rel=1e-6)
 
 
