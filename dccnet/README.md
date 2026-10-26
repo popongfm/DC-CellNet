@@ -13,6 +13,36 @@ DC-CellNet research code for blood-smear cell detection (design spec and plan in
 
 `dccnet/data/` and `dccnet/runs/` are git-ignored.
 
+## M1 — YOLO26m baseline (run on Windows)
+Anaconda Prompt, from `C:\Research\dccnet`:
+
+    conda activate dccnet
+    pip install ultralytics
+
+1. Prepare splits and the YOLO copy:
+
+       python scripts/prepare_data.py --txl-root data/TXL-PBC_Dataset/TXL-PBC --bccd-root data/bccd_full/BCCD --data-root data --extra-dedupe-dir ..\blood-cell-detection-datatset
+
+2. Train:
+
+       yolo detect train model=yolo26m.pt data=data/yolo_pooled/data_pooled.yaml epochs=150 patience=100 imgsz=640 batch=8 seed=0 amp=True project=runs name=yolo26m_pooled
+
+3. Predict on val and test (original images from the split JSON):
+
+       python scripts/baselines/yolo_predict.py --weights runs/yolo26m_pooled/weights/best.pt --split data/splits/pooled.json --subset val --data-root data --conf 0.001 --imgsz 640 --batch 8 --device 0 --max-det 1000 --out runs/yolo26m_pooled/preds_val.json
+       python scripts/baselines/yolo_predict.py --weights runs/yolo26m_pooled/weights/best.pt --split data/splits/pooled.json --subset test --data-root data --conf 0.001 --imgsz 640 --batch 8 --device 0 --max-det 1000 --out runs/yolo26m_pooled/preds_test.json
+
+4. Choose the score threshold on val (max micro-F1 at IoU 0.5; prints `best_thr`):
+
+       python scripts/evaluate.py --split data/splits/pooled.json --subset val --preds runs/yolo26m_pooled/preds_val.json --data-root data --out runs/yolo26m_pooled/sweep_val.json --sweep-thr
+
+5. Evaluate on test with that threshold (replace `0.35` with `best_thr`):
+
+       python scripts/evaluate.py --split data/splits/pooled.json --subset test --preds runs/yolo26m_pooled/preds_test.json --score-thr 0.35 --data-root data --out runs/yolo26m_pooled/summary_test.json
+
+M1 gate: test mAP50 about 0.95-0.99 and mAP50-95 about 0.80-0.90 (TXL-PBC published YOLO range); outside that,
+debug the evaluator / class mapping before M2.
+
 ## Data notes
 - `scripts/prepare_data.py --txl-root <TXL-PBC> --bccd-root <BCCD folder with Annotations/JPEGImages> --data-root data`
   writes `data/splits/*.json`, `data/dedupe_report.csv` and the YOLO copy `data/yolo_pooled/` (idempotent).
