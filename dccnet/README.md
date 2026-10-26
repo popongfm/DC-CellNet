@@ -64,7 +64,14 @@ debug the evaluator / class mapping before M2.
 Question: does the local count-consistency loss `L_cc` help separate overlapping cells? Three arms
 (`configs/exp_m2_circlenet.yaml`: no density head; `exp_m2_density.yaml`: density head, no `L_cc`;
 `exp_m2_dccell.yaml`: density head + `L_cc`) x seeds 0, 1, 2 = 9 runs on the synthetic overlapping-disc set
-(400 train / 100 val / 200 test; generated automatically if `data\splits\synthetic.json` is missing).
+(400 train / 100 val / 200 test; generated automatically if `data\splits\synthetic.json` or
+`data\synthetic\VERSION` is missing, or `VERSION` is not `2`).
+
+**Synthetic data must be regenerated (version 2).** Version 1 drew every disc half a pixel off its GT centre
+(cv2 pixel-centre vs our edge convention); version 2 draws at sub-pixel precision so the drawn centroid equals the GT
+centre. `run_m2.bat` regenerates `data\synthetic` + `data\splits\synthetic.json` by itself when `VERSION` is missing
+or not `2` (the images are overwritten in place). Any run folders made on version-1 data (e.g. an earlier
+`runs_smoke\`) are stale: delete them before re-running.
 
 Anaconda Prompt:
 
@@ -94,8 +101,10 @@ evaluates test at the swept `best_thr`; progress goes to the console and `runs\m
   skips training. It stops at the first failing command. If a run was killed mid-training (a run folder with
   `best.pt` but no `summary.json`), the script renames that folder to `exp_m2_<arm>_s<seed>_aborted_<n>` and trains
   it fresh; `compare_runs` ignores such folders and you may delete them manually later.
-- **Duration:** 9 runs x at most 60 epochs (early stopping, patience 20) on the 5060 Ti; plan for several hours and
-  leave the machine alone. The first command output tells you per-epoch time.
+- **Duration:** 9 runs x at most 60 epochs (best checkpoint / early stopping only from epoch 15, the end of the
+  `L_cc` ramp, then patience 20) on the 5060 Ti; plan for several hours and leave the machine alone. The first command
+  output tells you per-epoch time. Test evaluation skips the slow mAP bootstrap CI (`--map-ci-n 0`), so each run's
+  evaluate step takes seconds; Claude computes the mAP CIs offline later from `preds_test.json`.
 - **Send back:** nothing. Claude reads `runs\` from the shared folder and runs
   `python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2_go_no_go.md`
   (GO iff the paired-bootstrap 95% CI of the RBC |count error| difference dccell - circlenet is entirely below 0 and

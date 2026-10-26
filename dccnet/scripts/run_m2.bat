@@ -2,7 +2,7 @@
 rem M2 go/no-go runner (Windows cmd). Run from C:\Research\dccnet with the dccnet conda env active:
 rem     scripts\run_m2.bat
 rem For each config (circlenet density dccell) and seed (0 1 2): train, predict val, sweep threshold on val,
-rem predict test, evaluate test at the swept best_thr. Resumable: re-run to continue. Stops at the first failure.
+rem predict test, evaluate test at the swept best_thr (no mAP CI: --map-ci-n 0, computed offline later). Resumable: re-run to continue. Stops at the first failure.
 rem Optional knobs (environment variables, default off): M2_SEEDS, M2_CONFIGS, M2_RUNS_DIR, M2_DATA_ROOT,
 rem M2_CONFIG_DIR, M2_DEVICE, M2_TRAIN_ARGS, M2_PREDICT_ARGS  (same meaning as in run_m2.sh).
 setlocal EnableExtensions
@@ -20,8 +20,14 @@ set "SPLIT=%M2_DATA_ROOT%\splits\synthetic.json"
 set "LOG=%M2_RUNS_DIR%\m2_runner.log"
 if not exist "%M2_RUNS_DIR%" mkdir "%M2_RUNS_DIR%"
 
-if not exist "%SPLIT%" (
-  call :log generate synthetic data
+rem Synthetic data: (re)generate when the split or data\synthetic\VERSION is missing, or VERSION is not 2.
+set "SYNVER="
+if exist "%M2_DATA_ROOT%\synthetic\VERSION" set /p SYNVER=<"%M2_DATA_ROOT%\synthetic\VERSION"
+set "REGEN="
+if not exist "%SPLIT%" set "REGEN=1"
+if not "%SYNVER%"=="2" set "REGEN=1"
+if defined REGEN (
+  call :log generate synthetic data - version 2, found "%SYNVER%"
   "%M2_PYTHON%" scripts\make_synthetic.py --out "%M2_DATA_ROOT%\synthetic" --data-root "%M2_DATA_ROOT%" --seed 0 || goto :fail
 )
 
@@ -73,6 +79,6 @@ if not defined THR (
 call :log %TAG%: predict test, best_thr=%THR%
 "%M2_PYTHON%" scripts\predict.py --run "%RUN%" --split "%SPLIT%" --subset test --data-root "%M2_DATA_ROOT%" --out "%RUN%\preds_test.json" %DEVARG% %M2_PREDICT_ARGS% || exit /b 1
 call :log %TAG%: evaluate test at thr %THR%
-"%M2_PYTHON%" scripts\evaluate.py --split "%SPLIT%" --subset test --preds "%RUN%\preds_test.json" --data-root "%M2_DATA_ROOT%" --out "%RUN%\summary_test.json" --score-thr %THR% --map-ci-n 200 || exit /b 1
+"%M2_PYTHON%" scripts\evaluate.py --split "%SPLIT%" --subset test --preds "%RUN%\preds_test.json" --data-root "%M2_DATA_ROOT%" --out "%RUN%\summary_test.json" --score-thr %THR% --map-ci-n 0 || exit /b 1
 call :log %TAG%: finished
 exit /b 0

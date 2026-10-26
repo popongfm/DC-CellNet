@@ -2,7 +2,7 @@
 # M2 go/no-go runner (bash twin of run_m2.bat). Run from the dccnet/ directory.
 #
 # For each config in (circlenet density dccell) and seed in (0 1 2): train -> predict val -> sweep threshold on val ->
-# predict test -> evaluate test at the swept best_thr. Resumable: a run with runs/exp_m2_<cfg>_s<seed>/summary_test.json
+# predict test -> evaluate test at the swept best_thr (--map-ci-n 0: the mAP CI is computed offline later). Resumable: a run with runs/exp_m2_<cfg>_s<seed>/summary_test.json
 # is skipped, a run with summary.json skips training. Stops at the first failing command.
 #
 # Optional knobs (environment variables, all default-off / default to the real experiment):
@@ -32,8 +32,10 @@ LOG="$RUNS/m2_runner.log"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG"; }
 trap 'log "FAILED (exit $?) at: $BASH_COMMAND"' ERR
 
-if [ ! -f "$SPLIT" ]; then
-  log "generate synthetic data -> $SPLIT"
+# (re)generate when the split or $DATA/synthetic/VERSION is missing, or VERSION is not 2
+SYNVER="$(cat "$DATA/synthetic/VERSION" 2>/dev/null || true)"
+if [ ! -f "$SPLIT" ] || [ "$SYNVER" != "2" ]; then
+  log "generate synthetic data (version 2, found '${SYNVER}') -> $SPLIT"
   "$PY" scripts/make_synthetic.py --out "$DATA/synthetic" --data-root "$DATA" --seed 0
 fi
 
@@ -69,7 +71,7 @@ for cfg in $CONFIGS; do
       --out "$run/preds_test.json" ${DEV[@]+"${DEV[@]}"} ${PRED_ARGS[@]+"${PRED_ARGS[@]}"}
     log "$tag: evaluate test at thr $thr"
     "$PY" scripts/evaluate.py --split "$SPLIT" --subset test --preds "$run/preds_test.json" --data-root "$DATA" \
-      --out "$run/summary_test.json" --score-thr "$thr" --map-ci-n 200
+      --out "$run/summary_test.json" --score-thr "$thr" --map-ci-n 0
     log "$tag: finished"
   done
 done
