@@ -246,3 +246,23 @@ C5 (WBC subtype) → spec แยกหลัง M4
 - Zheng et al. (decoupling counting & localization) — arXiv 2503.13989 (MICCAI 2024)
 - Raabin-WBC — Scientific Reports 2022 (PMC8782871)
 - Naruenatthanaset et al. (overlapping RBC, Chula RBC-12) — arXiv 2012.01321
+
+---
+
+## 9. Amendments ระหว่าง implementation (2026-10-27)
+
+การตัดสินใจระหว่างลงมือ M0–M2 (บันทึกครบใน ledger) ที่เปลี่ยนจากข้อความข้างบน:
+
+| ID | ส่วนที่เปลี่ยน | เดิม | ปัจจุบัน | เหตุผล |
+|---|---|---|---|---|
+| R13 | §2.3 peak mask | `P = 1[H == maxpool(H)]` | `P = 1[H == maxpool(H) ∧ H > 0.01]` (`loss.cc.peak_thr`) | local maxima ในพื้นหลังไปปน N_det และกด gradient ของ peak จริง |
+| R21 | §2.3 soft count | `N_det = Σ H·P` | `N_det = Σ P·sigmoid((H − 0.3)/0.05)` (`loss.cc.count_fn: sigmoid`; `linear` = แบบเดิม ใช้ทำ ablation) | ให้นับจำนวน detection ไม่ใช่ความสูงของ peak; gradient ไปลงที่ peak ใกล้เส้นตัดสินใจ |
+| R17/R18 | §2.2 density head | ReLU | softplus, bias init −7.0; count term normalize ด้วย max(Σgt, 1) | ReLU + count-L1 ทำให้ช่อง WBC/PLT ตายภายในราว 10 step |
+| R14 | §2.2 heads | — | sigmoid/clamp/softplus คำนวณใน fp32; focal ทำ re-clamp ซ้ำ | กัน inf ตอนใช้ AMP |
+| — | §2.1 input | — | normalize input ด้วย mean/std ของ ImageNet ภายในโมเดล | ให้ใช้ pretrained ResNet-50 ได้เต็มประสิทธิภาพ |
+| R20 | §4.5 checkpoint | เลือก best ตั้งแต่ epoch 0 | `train.select_from_epoch = 15` (= warm-up + ramp) ทุกแขน; patience เริ่มนับจาก epoch นั้น | กันกรณีเลือก checkpoint ของแขน dccell ที่ยังไม่ได้เทรนด้วย L_cc |
+| R16 | §4.2 decode for mAP | ใช้ score_thr ของ config | decode ที่ 0.001 / 1000 dets (เท่ากับ YOLO conf 0.001); operating threshold เลือกจาก val (max micro-F1) | ให้ mAP ยุติธรรมระหว่างโมเดล |
+| R19 | §6 M2 | 300 / 30 | M2 synthetic: epochs_max 60, patience 20 | M2 เป็นการพิสูจน์กลไกบน toy data |
+| — | §4.6 / §6 gate M2 | dccell vs circlenet | GO ต้องผ่านทั้ง dccell<circlenet **และ** dccell<density (paired bootstrap CI ของ RBC |err| < 0 + recall bin≥2 สูงกว่า + ชนะครบทุก seed); ข้อมูลไม่ครบ → INCONCLUSIVE | แยกผลของ L_cc ออกจากผลของ density head |
+| — | §3 / §3.6 | overlap set = 172 ภาพ | 204 ภาพ (BCCD full ที่ไม่ซ้ำกับ TXL-PBC); 172 คือภาพที่ถูกคัดออกเพราะ `RBC_noboundary` → label น่าจะไม่ครบ ต้อง audit ก่อน M3 | จากการตรวจ `BCCD_selection.xlsx` |
+| — | §1.4 GPU | RTX 4070 | RTX 5060 Ti 8 GB (sm_120, ต้องใช้ torch cu128); batch 8 + AMP | ฮาร์ดแวร์จริง |
