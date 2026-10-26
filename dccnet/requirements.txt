@@ -12,3 +12,4 @@ imagehash
 timm
 ultralytics
 pytest
+openpyxl
