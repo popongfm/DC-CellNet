@@ -107,7 +107,10 @@ evaluates test at the swept `best_thr`; progress goes to the console and `runs\m
   evaluate step takes seconds; Claude computes the mAP CIs offline later from `preds_test.json`.
 - **Send back:** nothing. Claude reads `runs\` from the shared folder and runs
   `python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2_go_no_go.md`
-  (GO iff the paired-bootstrap 95% CI of the RBC |count error| difference dccell - circlenet is entirely below 0 and
-  pooled recall in overlap bins 2+3 is higher for dccell).
+  (`--seeds 0,1,2` by default). Verdict is GO / NO-GO / INCONCLUSIVE. GO iff dccell beats **both** circlenet and
+  density (density isolates `L_cc`), each comparison requiring: the paired-bootstrap 95% CI of the RBC |count error|
+  difference entirely below 0, higher pooled recall in overlap bins 2+3, and a negative paired MAE difference for every
+  seed. INCONCLUSIVE if any arm lacks a seed-0/1/2 run or a dccell run's `best_epoch` is before its
+  `select_from_epoch`.
 - `scripts/run_m2.sh` is the bash twin (used for CPU smoke tests). Optional env knobs, off by default: `M2_SEEDS`,
   `M2_CONFIGS`, `M2_DEVICE`, `M2_TRAIN_ARGS`, `M2_PREDICT_ARGS`, `M2_DATA_ROOT`, `M2_RUNS_DIR`, `M2_CONFIG_DIR`, `M2_PYTHON`.

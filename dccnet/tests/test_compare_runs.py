@@ -43,11 +43,14 @@ def _preds(samples, data_root, drop_middle, score=0.9, hidden_score=0.4):
     return out
 
 
-def _write_run(runs, arm, seed, preds, best_epoch=30, thr=0.5, m_ap=0.5, prefix="exp_m2_"):
+def _write_run(runs, arm, seed, preds, best_epoch=30, thr=0.5, m_ap=0.5, prefix="exp_m2_", select_from=None):
     d = runs / f"{prefix}{arm}_s{seed}"
     d.mkdir(parents=True)
-    (d / "summary.json").write_text(json.dumps({"exp": d.name, "config_stem": f"{prefix}{arm}", "seed": seed,
-                                                "best_epoch": best_epoch, "val": {}, "test": None}))
+    summary = {"exp": d.name, "config_stem": f"{prefix}{arm}", "seed": seed, "best_epoch": best_epoch,
+               "val": {}, "test": None}
+    if select_from is not None:
+        summary["select_from_epoch"] = select_from
+    (d / "summary.json").write_text(json.dumps(summary))
     (d / "sweep_val.json").write_text(json.dumps({"sweep": [], "best_thr": thr}))
     (d / "summary_test.json").write_text(json.dumps({"coco": {"mAP50_95": m_ap}}))
     (d / "preds_test.json").write_text(json.dumps(preds))
@@ -68,13 +71,16 @@ def _run(w, extra=()):
                            "--out", str(w["out"]), *extra], capture_output=True, text=True)
 
 
-def _fill(w, cand_drops_middle, seeds=(0, 1, 2), cand_best_epoch=30):
+def _fill(w, cand_drops_middle, seeds=(0, 1, 2), cand_best_epoch=30, density_drops_middle=True,
+          cand_select_from=None, density_seeds=None):
     s, dr = w["samples"], w["data_root"]
     for seed in seeds:
         _write_run(w["runs"], "circlenet", seed, _preds(s, dr, drop_middle=True), m_ap=0.40 + 0.01 * seed)
-        _write_run(w["runs"], "density", seed, _preds(s, dr, drop_middle=True), m_ap=0.45)
-        _write_run(w["runs"], "dccell", seed, _preds(s, dr, drop_middle=cand_drops_middle),
-                   best_epoch=cand_best_epoch, m_ap=0.60)
+        if density_seeds is None or seed in density_seeds:
+            _write_run(w["runs"], "density", seed, _preds(s, dr, drop_middle=density_drops_middle), m_ap=0.45)
+        drops = cand_drops_middle(seed) if callable(cand_drops_middle) else cand_drops_middle
+        _write_run(w["runs"], "dccell", seed, _preds(s, dr, drop_middle=drops),
+                   best_epoch=cand_best_epoch, m_ap=0.60, select_from=cand_select_from)
 
 
 def test_go_case(world):
@@ -103,6 +109,16 @@ def test_go_case(world):
     # density-vs-circlenet diagnostic is identical predictions -> diff 0, not a GO
     assert res["diagnostic"]["verdict"] == "NO-GO"
     assert res["diagnostic"]["diff_ci"] == pytest.approx((0.0, 0.0))
+    # second gate: dccell vs density (isolates L_cc), computed like the main gate
+    ga = res["gate_ablation"]
+    assert ga["verdict"] == "GO" and ga["diff_ci"] == pytest.approx((-1.0, -1.0))
+    assert ga["baseline_recall_ge2"] == pytest.approx(0.0) and ga["candidate_recall_ge2"] == pytest.approx(1.0)
+    # per-seed paired MAE differences
+    assert g["per_seed_diff"] == pytest.approx({0: -1.0, 1: -1.0, 2: -1.0})
+    assert ga["per_seed_diff"] == pytest.approx({0: -1.0, 1: -1.0, 2: -1.0})
+    assert g["ok_seeds"] and ga["ok_seeds"]
+    assert res["verdict"] == "GO" and res["inconclusive"] == []
+    assert "dccell vs density" in md and "per-seed" in md
 
 
 def test_nogo_when_no_improvement(world):
@@ -143,7 +159,75 @@ def test_missing_arm_is_inconclusive_not_go(world):
     _write_run(world["runs"], "circlenet", 0, _preds(s, dr, True))
     r = _run(world)
     assert r.returncode == 0
-    assert "VERDICT: NO-GO" in r.stdout and "dccell" in world["out"].read_text()
+    assert "VERDICT: INCONCLUSIVE" in r.stdout
+    md = world["out"].read_text()
+    assert "VERDICT: INCONCLUSIVE" in md and "dccell" in md and "density" in md
+
+
+def test_nogo_when_dccell_not_better_than_density(world):
+    # dccell beats circlenet, but density (no L_cc) is just as good -> the gain is not L_cc's
+    _fill(world, cand_drops_middle=False, density_drops_middle=False)
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])
+    assert res["gate"]["verdict"] == "GO"
+    assert res["gate_ablation"]["verdict"] == "NO-GO"
+    assert res["gate_ablation"]["diff_ci"] == pytest.approx((0.0, 0.0))
+    assert res["verdict"] == "NO-GO"
+    r = _run(world)
+    assert "VERDICT: NO-GO" in r.stdout
+
+
+def test_nogo_when_one_seed_not_better(world):
+    # dccell seed 2 is no better than the baselines' seed 2; pooled CI still < 0 and pooled recall still higher
+    _fill(world, cand_drops_middle=lambda seed: seed == 2)
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])
+    for key in ("gate", "gate_ablation"):
+        g = res[key]
+        assert g["ok_mae"] and g["ok_recall"]
+        assert g["diff_ci"][1] < 0
+        assert g["per_seed_diff"] == pytest.approx({0: -1.0, 1: -1.0, 2: 0.0})
+        assert not g["ok_seeds"] and g["verdict"] == "NO-GO"
+    assert res["verdict"] == "NO-GO"
+    md = compare_runs.render(res)[0]
+    assert "s2 0.0000" in md
+
+
+def test_inconclusive_when_a_seed_is_missing(world):
+    _fill(world, cand_drops_middle=False, density_seeds=(0, 1))
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])
+    assert res["gate"]["verdict"] == "GO" and res["gate_ablation"]["verdict"] == "GO"
+    assert res["verdict"] == "INCONCLUSIVE"
+    assert any("density" in why and "2" in why for why in res["inconclusive"])
+
+
+def test_seeds_arg_sets_required_seeds(world):
+    _fill(world, cand_drops_middle=False, seeds=(0, 1))
+    assert compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])["verdict"] \
+        == "INCONCLUSIVE"
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"], seeds=(0, 1))
+    assert res["verdict"] == "GO"
+    r = _run(world, ["--seeds", "0,1"])
+    assert "VERDICT: GO" in r.stdout
+
+
+def test_inconclusive_when_candidate_selected_before_select_from_epoch(world):
+    _fill(world, cand_drops_middle=False, cand_best_epoch=10)  # no select_from_epoch in summary -> fallback 15
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])
+    assert res["verdict"] == "INCONCLUSIVE"
+    assert any("best_epoch 10" in why for why in res["inconclusive"])
+
+
+def test_select_from_epoch_read_from_summary(world):
+    _fill(world, cand_drops_middle=False, cand_best_epoch=10, cand_select_from=4)
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])
+    assert res["verdict"] == "GO"
+    _fill_dir = world["runs"]
+    for d in _fill_dir.iterdir():
+        if "dccell" in d.name:
+            sm = json.loads((d / "summary.json").read_text())
+            sm["select_from_epoch"] = 12
+            (d / "summary.json").write_text(json.dumps(sm))
+    assert compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])["verdict"] \
+        == "INCONCLUSIVE"
 
 
 def test_threshold_comes_from_sweep_val(world):
@@ -170,7 +254,7 @@ def test_split_relative_to_data_root(world):
     _fill(world, cand_drops_middle=False, seeds=(0,))
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "compare_runs.py"), "--runs-dir", str(world["runs"]),
                         "--split", "splits/synthetic.json", "--data-root", str(world["data_root"]),
-                        "--out", str(world["out"])], capture_output=True, text=True)
+                        "--out", str(world["out"]), "--seeds", "0"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "VERDICT: GO" in r.stdout
 

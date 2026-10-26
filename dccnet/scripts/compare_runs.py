@@ -2,16 +2,25 @@
 
 Usage (from dccnet/):
     python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json \
-        --data-root data --out reports/m2_go_no_go.md [--baseline circlenet --candidate dccell]
+        --data-root data --out reports/m2_go_no_go.md [--baseline circlenet --candidate dccell --ablation density]
+        [--seeds 0,1,2]
 
 Run dirs are ``<runs-dir>/<prefix><arm>_s<seed>`` and must hold summary.json, sweep_val.json (best_thr),
 summary_test.json and preds_test.json (see scripts/run_m2.bat). Per-image RBC |count error| and per-overlap-bin
 TP/n_gt are recomputed from preds_test.json at each run's own best_thr.
 
-Gate (candidate vs baseline, only seeds present in both arms): per test image the RBC |count error| is averaged
-over those seeds; the 95% paired-bootstrap CI of mean(candidate) - mean(baseline) must lie entirely below 0 AND the
-pooled recall in overlap bins 2+3 (TP / n_gt, summed over seeds) must be higher for the candidate. Else NO-GO.
-The exit code is always 0; the verdict line is printed and written to the report.
+Two comparisons, each computed the same way (only requested seeds present in both arms): dccell vs circlenet (main
+gate) and dccell vs density (isolates L_cc). A comparison passes iff
+  * per test image the RBC |count error| is averaged over the common seeds; the 95% paired-bootstrap CI of
+    mean(candidate) - mean(baseline) lies entirely below 0, AND
+  * the pooled recall in overlap bins 2+3 (TP / n_gt, summed over seeds) is higher for the candidate, AND
+  * seed robustness: for every common seed s, mean over images of |err|(candidate s) - |err|(baseline s) < 0.
+Verdict:
+  * INCONCLUSIVE if any of the three arms lacks a complete run for any requested seed (--seeds, default 0,1,2), or
+    any candidate run has best_epoch < its select_from_epoch (summary.json; fallback 15 for older runs);
+  * else GO iff both comparisons pass; else NO-GO.
+density vs circlenet is reported as a diagnostic only. The exit code is always 0; the verdict line is printed and
+written to the report.
 """
 from __future__ import annotations
 
@@ -32,7 +41,8 @@ from dccnet.eval.counting import count_errors  # noqa: E402
 from dccnet.eval.export_json import load_records  # noqa: E402
 from dccnet.eval.overlap_bins import N_BINS, overlap_counts  # noqa: E402
 
-EARLY_EPOCH = 15  # dccell runs selected before this epoch never saw the full L_cc weight
+EARLY_EPOCH = 15  # fallback select_from_epoch (end of the L_cc ramp) for runs whose summary.json predates R20
+DEFAULT_SEEDS = (0, 1, 2)
 ARM_ORDER = ("circlenet", "density", "dccell")
 NAN = float("nan")
 
@@ -63,6 +73,7 @@ def load_run(run_dir: Path, samples, data_root: Path) -> dict:
     tot = counts.sum(axis=0)
     recall = [float(tot[b, 0] / tot[b, 2]) if tot[b, 2] > 0 else NAN for b in range(N_BINS)]
     return {"name": run_dir.name, "best_epoch": summary.get("best_epoch"), "thr": thr,
+            "select_from": int(summary.get("select_from_epoch", EARLY_EPOCH)),
             "map": (test.get("coco") or {}).get("mAP50_95"), "abs_err": np.abs(err), "counts": counts,
             "recall": recall, "mae": float(np.abs(err).mean()),
             "summary_mae": ((test.get("counting") or {}).get("MAE") or {}).get("RBC")}
@@ -90,8 +101,9 @@ def summarize_arm(runs: dict[int, dict]) -> dict:
             "thr": {s: r["thr"] for s, r in sorted(runs.items())}}
 
 
-def gate(cand: dict[int, dict], base: dict[int, dict], n_boot: int = 1000) -> dict | None:
-    seeds = sorted(set(cand) & set(base))
+def gate(cand: dict[int, dict], base: dict[int, dict], n_boot: int = 1000, seeds=None) -> dict | None:
+    """One comparison (candidate vs baseline) over the common seeds (restricted to ``seeds`` if given)."""
+    seeds = sorted(set(cand) & set(base) & (set(seeds) if seeds is not None else set(cand)))
     if not seeds:
         return None
     c_err = np.mean([cand[s]["abs_err"] for s in seeds], axis=0)
@@ -107,12 +119,15 @@ def gate(cand: dict[int, dict], base: dict[int, dict], n_boot: int = 1000) -> di
     ci_b = bootstrap_ci(pb, stat=_ratio, n=n_boot, seed=0) if pb[:, 1].sum() > 0 else (NAN, NAN)
     ok_mae = bool(hi < 0)
     ok_rec = bool(rc > rb)  # False when either is NaN
+    per_seed = {s: float(np.mean(cand[s]["abs_err"] - base[s]["abs_err"])) for s in seeds}
+    ok_seeds = all(v < 0 for v in per_seed.values())  # False on NaN
     return {"seeds": seeds, "n_images": len(c_err), "candidate_mae": float(c_err.mean()),
             "baseline_mae": float(b_err.mean()), "diff": float(c_err.mean() - b_err.mean()), "diff_ci": (lo, hi),
             "candidate_recall_ge2": rc, "baseline_recall_ge2": rb,
             "candidate_recall_ci": ci_c, "baseline_recall_ci": ci_b,
             "n_gt_ge2": int(pc[:, 1].sum()), "ok_mae": ok_mae, "ok_recall": ok_rec,
-            "verdict": "GO" if ok_mae and ok_rec else "NO-GO"}
+            "per_seed_diff": per_seed, "ok_seeds": ok_seeds,
+            "verdict": "GO" if ok_mae and ok_rec and ok_seeds else "NO-GO"}
 
 
 def _resolve_split(split: Path, data_root: Path) -> Path:
@@ -121,8 +136,22 @@ def _resolve_split(split: Path, data_root: Path) -> Path:
     return rel if rel.exists() or not Path(split).exists() else Path(split)
 
 
+def _comparison(loaded: dict, cand: str, base: str, n_boot: int, seeds, warnings: list[str]) -> dict:
+    missing = [a for a in (base, cand) if a not in loaded]
+    if missing:
+        warnings.append(f"{cand} vs {base} not evaluated: no complete runs for arm(s) {missing}")
+        return {"verdict": "NO-GO", "reason": f"missing arm(s) {missing}"}
+    g = gate(loaded[cand], loaded[base], n_boot, seeds)
+    if g is None:
+        warnings.append(f"{cand} vs {base} not evaluated: no common seed among {sorted(seeds)}")
+        return {"verdict": "NO-GO", "reason": "no common seeds"}
+    return g
+
+
 def compare(runs_dir: Path, prefix: str, split: Path, data_root: Path, baseline: str = "circlenet",
-            candidate: str = "dccell", n_boot: int = 1000) -> dict:
+            candidate: str = "dccell", n_boot: int = 1000, ablation: str = "density",
+            seeds=DEFAULT_SEEDS) -> dict:
+    seeds = tuple(sorted(int(x) for x in seeds))
     samples = read_split(_resolve_split(split, data_root), data_root)["test"]
     warnings: list[str] = []
     loaded: dict[str, dict[int, dict]] = {}
@@ -134,28 +163,37 @@ def compare(runs_dir: Path, prefix: str, split: Path, data_root: Path, baseline:
                 why = (f"missing {Path(e.filename).name}" if isinstance(e, FileNotFoundError) and e.filename
                        else f"unreadable file: {e}")
                 warnings.append(f"{d.name}: incomplete run skipped ({why})")
+    inconclusive: list[str] = []
     for arm, runs in loaded.items():
         for seed, r in runs.items():
             if r["summary_mae"] is not None and abs(r["summary_mae"] - r["mae"]) > 1e-6:
                 warnings.append(f"{r['name']}: recomputed RBC MAE {r['mae']:.4f} != summary_test.json "
                                 f"{r['summary_mae']:.4f}")
-            if arm == candidate and r["best_epoch"] is not None and r["best_epoch"] < EARLY_EPOCH:
-                warnings.append(f"{r['name']}: best_epoch {r['best_epoch']} < {EARLY_EPOCH} - "
+            early = r["best_epoch"] is None or r["best_epoch"] < r["select_from"]
+            if early:
+                warnings.append(f"{r['name']}: best_epoch {r['best_epoch']} < select_from_epoch {r['select_from']} - "
                                 f"selected before full L_cc weight")
+                if arm == candidate and seed in seeds:
+                    inconclusive.append(f"{r['name']}: best_epoch {r['best_epoch']} < select_from_epoch "
+                                        f"{r['select_from']}")
+    for arm in (baseline, ablation, candidate):
+        miss = [s for s in seeds if s not in loaded.get(arm, {})]
+        if miss:
+            inconclusive.append(f"arm {arm}: no complete run for seed(s) {miss}")
     arms = {a: summarize_arm(r) for a, r in loaded.items()}
-    res = {"arms": arms, "baseline": baseline, "candidate": candidate, "warnings": warnings,
-           "gate": None, "diagnostic": None, "n_boot": n_boot, "n_test_images": len(samples)}
-    missing = [a for a in (baseline, candidate) if a not in loaded]
-    if missing:
-        warnings.append(f"gate not evaluated: no complete runs for arm(s) {missing}")
-        res["gate"] = {"verdict": "NO-GO", "reason": f"missing arm(s) {missing}"}
+    res = {"arms": arms, "baseline": baseline, "candidate": candidate, "ablation": ablation, "seeds": list(seeds),
+           "warnings": warnings, "diagnostic": None, "n_boot": n_boot, "n_test_images": len(samples)}
+    res["gate"] = _comparison(loaded, candidate, baseline, n_boot, seeds, warnings)
+    res["gate_ablation"] = _comparison(loaded, candidate, ablation, n_boot, seeds, warnings)
+    if ablation in loaded and baseline in loaded:
+        res["diagnostic"] = gate(loaded[ablation], loaded[baseline], n_boot, seeds)
+    res["inconclusive"] = inconclusive
+    if inconclusive:
+        res["verdict"] = "INCONCLUSIVE"
+    elif res["gate"]["verdict"] == "GO" and res["gate_ablation"]["verdict"] == "GO":
+        res["verdict"] = "GO"
     else:
-        res["gate"] = gate(loaded[candidate], loaded[baseline], n_boot)
-        if res["gate"] is None:
-            warnings.append(f"gate not evaluated: {candidate} and {baseline} share no seed")
-            res["gate"] = {"verdict": "NO-GO", "reason": "no common seeds"}
-    if "density" in loaded and baseline in loaded:
-        res["diagnostic"] = gate(loaded["density"], loaded[baseline], n_boot)
+        res["verdict"] = "NO-GO"
     return res
 
 
@@ -182,15 +220,19 @@ def _gate_block(g: dict, cand: str, base: str, n_boot: int) -> list[str]:
         f"{_f(g['candidate_recall_ci'][1])}]) vs {base} {_f(g['baseline_recall_ge2'])} "
         f"(95% CI [{_f(g['baseline_recall_ci'][0])}, {_f(g['baseline_recall_ci'][1])}]) -> candidate higher: "
         f"**{'yes' if g['ok_recall'] else 'no'}**",
+        "- per-seed paired RBC |count error| difference (mean over images, " + cand + " seed s - " + base
+        + " seed s): " + ", ".join(f"s{s} {_f(v)}" for s, v in sorted(g["per_seed_diff"].items()))
+        + f" -> all < 0: **{'yes' if g['ok_seeds'] else 'no'}**",
+        f"- comparison: **{'pass' if g['verdict'] == 'GO' else 'fail'}**",
     ]
 
 
 def render(res: dict) -> tuple[str, str]:
-    cand, base = res["candidate"], res["baseline"]
+    cand, base, abl = res["candidate"], res["baseline"], res["ablation"]
     order = [a for a in ARM_ORDER if a in res["arms"]] + sorted(a for a in res["arms"] if a not in ARM_ORDER)
     L = ["# M2 go/no-go: does L_cc help separate overlapping cells?", "",
-         f"Test images: {res['n_test_images']}. Values are mean ± std (sample std) over seeds; thresholds are each "
-         f"run's own val-swept best_thr.", "", "## Per-arm results", "",
+         f"Test images: {res['n_test_images']}. Required seeds: {res['seeds']}. Values are mean ± std (sample std) "
+         f"over seeds; thresholds are each run's own val-swept best_thr.", "", "## Per-arm results", "",
          "| arm | n_seeds | test mAP50-95 | RBC count MAE | recall bin 0 | recall bin 1 | recall bin 2 | recall bin 3 "
          "| best_epoch |", "|---|---|---|---|---|---|---|---|---|"]
     for a in order:
@@ -199,14 +241,20 @@ def render(res: dict) -> tuple[str, str]:
                  + " | ".join(_pm(r["mean"], r["std"]) for r in s["recall"])
                  + f" | {_pm(s['best_epoch_mean'], s['best_epoch_std'], 1)} |")
     L += ["", "Overlap bin = number of other GT circles a cell overlaps (0..3+). Recall at IoU 0.5.", "",
-          f"## Gate: {cand} vs {base}", ""]
-    g = res["gate"]
-    L += _gate_block(g, cand, base, res["n_boot"])
-    verdict = f"VERDICT: {g['verdict']} ({cand} vs {base})"
-    L += ["", f"**{verdict}**", ""]
+          f"## Gate 1: {cand} vs {base}", ""]
+    L += _gate_block(res["gate"], cand, base, res["n_boot"])
+    L += ["", f"## Gate 2: {cand} vs {abl} (isolates L_cc)", ""]
+    L += _gate_block(res["gate_ablation"], cand, abl, res["n_boot"])
+    verdict = f"VERDICT: {res['verdict']} ({cand} vs {base} and {cand} vs {abl})"
+    L += ["", "## Verdict", "",
+          "GO requires both gates to pass; INCONCLUSIVE when a required seed run is missing for any arm or a "
+          f"{cand} run picked its checkpoint before its select_from_epoch.", ""]
+    if res["inconclusive"]:
+        L += [f"- inconclusive: {why}" for why in res["inconclusive"]] + [""]
+    L += [f"**{verdict}**", ""]
     if res["diagnostic"]:
-        L += ["## Diagnostic: density vs " + base + " (not part of the gate)", ""]
-        L += _gate_block(res["diagnostic"], "density", base, res["n_boot"])
+        L += [f"## Diagnostic: {abl} vs {base} (not part of the gate)", ""]
+        L += _gate_block(res["diagnostic"], abl, base, res["n_boot"])
         L.append("")
     if res["warnings"]:
         L += ["## Warnings", ""] + [f"- ⚠ {w}" for w in res["warnings"]] + [""]
@@ -222,9 +270,13 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--baseline", default="circlenet")
     ap.add_argument("--candidate", default="dccell")
+    ap.add_argument("--ablation", default="density", help="second baseline: candidate minus L_cc")
+    ap.add_argument("--seeds", default="0,1,2", help="comma-separated seeds every arm must have")
     args = ap.parse_args(argv)
+    seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
 
-    res = compare(args.runs_dir, args.prefix, args.split, args.data_root, args.baseline, args.candidate)
+    res = compare(args.runs_dir, args.prefix, args.split, args.data_root, args.baseline, args.candidate,
+                  ablation=args.ablation, seeds=seeds)
     md, verdict = render(res)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(md, encoding="utf-8")
