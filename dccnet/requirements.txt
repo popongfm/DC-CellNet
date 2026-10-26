@@ -1,0 +1,14 @@
+torch>=2.3
+torchvision
+numpy
+opencv-python
+pillow
+pyyaml
+scipy
+pandas
+matplotlib
+pycocotools
+imagehash
+timm
+ultralytics
+pytest
