@@ -12,9 +12,10 @@ def focal_loss(pred: torch.Tensor, gt: torch.Tensor, alpha: float = 2, beta: flo
 
     Positives are cells where ``gt == 1`` (exact). Loss =
     ``(sum_pos -log(p)(1-p)^alpha + sum_neg -log(1-p) p^alpha (1-gt)^beta) / max(num_pos, 1)``.
-    Inputs are cast to float32 (AMP safety); returns a 0-dim float32 tensor.
+    Inputs are cast to float32 and ``pred`` re-clamped to [1e-4, 1-1e-4] (AMP safety); returns a 0-dim float32 tensor.
     """
-    pred = pred.float()
+    # re-clamp after the cast: fp16 clamp(max=1-1e-4) rounds to 1.0 -> log(0) = -inf
+    pred = pred.float().clamp(1e-4, 1 - 1e-4)
     gt = gt.float()
     pos = gt.eq(1).float()
     neg = 1.0 - pos

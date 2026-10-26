@@ -5,6 +5,8 @@ import torch
 
 from dccnet.datasets.geometry import circle_iou
 
+_MAX_LOG_R = 10.0  # exp overflow guard for the cIoU circle only (l1 uses raw log_r)
+
 
 def _gather(feat: torch.Tensor, ind: torch.Tensor) -> torch.Tensor:
     """(B,Ch,H,W) gathered at flat indices ``ind`` (B,K) = iy*W+ix -> (B,K,Ch)."""
@@ -27,7 +29,7 @@ def radius_ciou_loss(
     * ``l1`` = mean |pred_log_r - log_r|.
     * ``ciou`` = mean (1 - circle_iou(pred_circle, targets["circle"])) with
       pred_circle = ((ix + off_x)*stride, (iy + off_y)*stride, exp(pred_log_r)),
-      ix = ind % W, iy = ind // W (input px; computed in float32 since circle_iou
+      ix = ind % W, iy = ind // W; log_r clamped to <= 10 for the radius (input px; computed in float32 since circle_iou
       is not fp16-safe).
     With no valid objects both are ``0 * pred_log_r.sum()`` (zero, graph-attached).
     """
@@ -47,7 +49,7 @@ def radius_ciou_loss(
     ix = (ind % W)[valid].float()
     iy = (ind // W)[valid].float()
     pred_circle = torch.stack(
-        [(ix + off[:, 0]) * stride, (iy + off[:, 1]) * stride, torch.exp(lr)], dim=-1
+        [(ix + off[:, 0]) * stride, (iy + off[:, 1]) * stride, torch.exp(lr.clamp(max=_MAX_LOG_R))], dim=-1
     )
     gt_circle = targets["circle"].float()[valid]
     ciou = (1.0 - circle_iou(pred_circle, gt_circle)).mean()

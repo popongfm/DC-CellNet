@@ -278,6 +278,7 @@ def _cfg(density=True, cc=True):
                 "scope": "local",
                 "window": 8,
                 "stop_grad_density": True,
+                "peak_thr": 0.01,
                 "warmup_epochs": 10,
                 "ramp_epochs": 5,
             },
@@ -298,7 +299,10 @@ def _fake_outputs(with_density, seed=0):
     return out
 
 
-KEYS = {"loss_focal", "loss_r", "loss_ciou", "loss_o", "loss_d", "loss_cc", "lambda_cc", "loss_total"}
+KEYS = {
+    "loss_focal", "loss_r", "loss_ciou", "loss_o", "loss_d",
+    "loss_cc", "loss_cc_bg", "lambda_cc", "loss_total",
+}
 
 
 def test_compute_losses_density_on():
@@ -337,6 +341,7 @@ def test_compute_losses_density_off():
     L = compute_losses(out, t, _cfg(False, False), epoch=20)
     assert set(L) == KEYS
     assert L["loss_d"].item() == 0.0 and L["loss_cc"].item() == 0.0
+    assert L["loss_cc_bg"].item() == 0.0
     assert L["lambda_cc"].item() == 0.0
     expected = L["loss_focal"] + 0.1 * (L["loss_r"] + L["loss_ciou"]) + L["loss_o"]
     assert L["loss_total"].item() == pytest.approx(expected.item(), rel=1e-6)
@@ -348,3 +353,98 @@ def test_compute_losses_density_on_cc_disabled():
     L = compute_losses(_fake_outputs(True), t, _cfg(True, False), epoch=20)
     assert L["loss_d"].item() > 0
     assert L["loss_cc"].item() == 0.0 and L["lambda_cc"].item() == 0.0
+    assert L["loss_cc_bg"].item() == 0.0
+
+
+# ---------------------------------------------------------------- fix round 1
+def test_focal_fp16_exact_zero_and_one_finite():
+    gt = torch.zeros(1, 1, 4, 4)
+    gt[0, 0, 1, 1] = 1.0
+    pred = torch.zeros(1, 1, 4, 4, dtype=torch.float16)
+    pred[0, 0, 1, 1] = 1.0  # what fp16 clamp(max=1-1e-4) produces
+    pred[0, 0, 2, 2] = 1.0  # false positive at exactly 1.0
+    loss = focal_loss(pred, gt)
+    assert loss.dtype == torch.float32 and torch.isfinite(loss)
+
+
+def test_radius_huge_log_r_finite_ciou():
+    t = _batched_targets(SETS)
+    log_r, off = _dense_from_targets(t, 16, 16)
+    big = torch.full_like(log_r, 100.0).requires_grad_()
+    l1, ciou = radius_ciou_loss(big, off, t, stride=4)
+    assert torch.isfinite(l1) and torch.isfinite(ciou)
+    (l1 + ciou).backward()
+    assert torch.isfinite(big.grad).all()
+
+
+def _floor_probe(H=64, W=64):
+    hm = torch.full((1, 1, H, W), EPS)
+    pts = [(3, 4), (10, 20), (25, 7)]
+    for y, x in pts:
+        hm[0, 0, y, x] = 1.0
+    return hm, pts
+
+
+def _exact_density(n, H=64, W=64):
+    d = torch.zeros(1, 1, H, W)
+    for i in range(n):
+        d[0, 0, 2 + i, 2] = 1.0  # exact integer mass inside window 0
+    return d
+
+
+@pytest.mark.parametrize("scope", ["local", "global"])
+def test_cc_floor_background_ignored(scope):
+    hm, pts = _floor_probe()
+    hm.requires_grad_()
+    d = _exact_density(3)
+    loss = count_consistency_loss(hm, d, window=32, scope=scope)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert torch.all(hm.grad == 0)
+
+
+def test_cc_subthreshold_background_max_no_effect():
+    hm, pts = _floor_probe()
+    hm[0, 0, 50, 50] = 0.005  # isolated local max below peak_thr, tile (1,1)
+    hm.requires_grad_()
+    d = _exact_density(3)
+    loss = count_consistency_loss(hm, d, window=32)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert hm.grad[0, 0, 50, 50] == 0
+
+
+def test_cc_weak_candidate_in_undercounted_tile_pushed_up():
+    hm, pts = _floor_probe()
+    hm[0, 0, 15, 15] = 0.05  # split candidate, above peak_thr but below decode.low_thr
+    hm.requires_grad_()
+    d = _density_sum(5.0)
+    loss = count_consistency_loss(hm, d, window=32)
+    assert loss.item() > 0
+    loss.backward()
+    # gradient descent (H -= lr * grad) increases H at the candidate
+    assert hm.grad[0, 0, 15, 15] < 0
+
+
+def test_cc_background_mass_diagnostic():
+    from dccnet.losses import cc_background_mass
+
+    hm = torch.zeros(2, 1, 8, 8)
+    hm[0, 0, 1, 1] = 0.005  # counted (<= thr, local max)
+    hm[0, 0, 5, 5] = 0.9    # real peak, not counted
+    hm[1, 0, 4, 4] = 0.01   # == thr -> counted
+    assert cc_background_mass(hm, 0.01).item() == pytest.approx((0.005 + 0.01) / 2, rel=1e-6)
+
+
+def test_compute_losses_cc_bg_logged_not_in_total():
+    t = _batched_targets(SETS)
+    out = _fake_outputs(True)
+    with torch.no_grad():
+        out["heatmap"].clamp_(max=0.009)  # every local max is background
+    L = compute_losses(out, t, _cfg(True, True), epoch=20)
+    assert L["loss_cc_bg"].item() > 0 and not L["loss_cc_bg"].requires_grad
+    expected = (
+        L["loss_focal"] + 0.1 * (L["loss_r"] + L["loss_ciou"]) + L["loss_o"]
+        + L["loss_d"] + 0.5 * L["loss_cc"]
+    )
+    assert L["loss_total"].item() == pytest.approx(expected.item(), rel=1e-6)
