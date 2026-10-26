@@ -14,6 +14,10 @@ Run dir (``fit``) contains exactly: ``config.yaml`` (resolved config), ``git_has
   ``cfg["decode"]``), records in original image px, ``coco_map`` + ``count_errors`` at
   ``decode.score_thr``. Best checkpoint by val mAP50_95 (ties -> earlier epoch); early stop after
   ``train.patience`` epochs without improvement; at most ``train.epochs_max`` epochs.
+* Selection window (R20): only epochs >= ``sel_from = min(train.select_from_epoch, epochs_max - 1)``
+  can become best / be saved to best.pt or count toward patience (base.yaml: 15 = end of the λ_cc
+  ramp, shared by every arm so a dccell checkpoint is never picked before L_cc is at full weight).
+  Earlier epochs are still validated and logged. The effective ``select_from_epoch`` is in summary.json.
   With a density head, the val metrics also carry per-class total predicted density
   (``den_count_<cls>``) vs GT density (``gt_count_<cls>``) over the val set.
 """
@@ -58,16 +62,22 @@ RUN_FILES = ("config.yaml", "git_hash.txt", "metrics.jsonl", "best.pt", "summary
 
 class EarlyStopping:
     """Track the best value (higher is better). ``None`` ranks below every number but above
-    "no epoch yet", so epoch 0 is always best and a checkpoint always exists."""
+    "no epoch yet", so the first eligible epoch is always best and a checkpoint always exists.
 
-    def __init__(self, patience: int) -> None:
+    Epochs before ``start_epoch`` (the checkpoint-selection window, R20) are ignored: they never
+    become best and never count toward ``patience``."""
+
+    def __init__(self, patience: int, start_epoch: int = 0) -> None:
         self.patience = int(patience)
+        self.start_epoch = int(start_epoch)
         self.best_key = -math.inf
         self.best_epoch: int | None = None
         self.bad_epochs = 0
 
     def step(self, value: float | None, epoch: int) -> bool:
         """Record one epoch; return True if it is the new best (strict improvement)."""
+        if epoch < self.start_epoch:
+            return False
         key = -1.0 if value is None else float(value)
         if key > self.best_key:
             self.best_key, self.best_epoch, self.bad_epochs = key, int(epoch), 0
@@ -278,6 +288,7 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
     cfg = copy.deepcopy(cfg)
     tcfg = cfg["train"]
     epochs_max, patience = int(tcfg["epochs_max"]), int(tcfg["patience"])
+    sel_from = max(0, min(int(tcfg.get("select_from_epoch", 0)), epochs_max - 1))
     if config_stem is None:
         config_stem = re.sub(r"_s\d+$", "", run_dir.name)
     if cfg["decode"].get("density_fill", False):
@@ -294,7 +305,7 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(tcfg["lr"]), weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs_max)
     scaler = torch.amp.GradScaler("cuda") if _use_amp(cfg, device) else None
-    stopper = EarlyStopping(patience)
+    stopper = EarlyStopping(patience, start_epoch=sel_from)
     best_val: dict = {}
 
     with open(run_dir / "metrics.jsonl", "w", encoding="utf-8") as mf:
@@ -332,6 +343,7 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
         "seed": int(tcfg["seed"]),
         "git_hash": ghash,
         "best_epoch": stopper.best_epoch,
+        "select_from_epoch": sel_from,
         "val": {"mAP50": _json_num(best_val.get("mAP50")), "mAP50_95": _json_num(best_val.get("mAP50_95")),
                 "rbc_count_mae": _json_num(best_val.get("rbc_count_mae"))},
         "test": None,

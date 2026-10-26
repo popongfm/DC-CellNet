@@ -89,14 +89,11 @@ def test_train_smoke_run_dir(smoke_run):
 
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["exp"] == "smoke_cfg_s3" and summary["config_stem"] == "smoke_cfg" and summary["seed"] == 3 and summary["test"] is None
-    assert summary["best_epoch"] in (0, 1)
+    # base select_from_epoch 15 is clamped to epochs_max - 1 = 1 (R20), so only epoch 1 is eligible
+    assert summary["select_from_epoch"] == 1 and summary["best_epoch"] == 1
     assert set(summary["val"]) == {"mAP50", "mAP50_95", "rbc_count_mae"}
     best_row = rows[summary["best_epoch"]]
     assert summary["val"]["mAP50_95"] == best_row["val_mAP50_95"]
-    # best = max mAP50_95, ties -> earlier epoch
-    assert best_row["val_mAP50_95"] == max(r["val_mAP50_95"] for r in rows)
-    if rows[0]["val_mAP50_95"] == rows[1]["val_mAP50_95"]:
-        assert summary["best_epoch"] == 0
 
     ckpt = torch.load(run_dir / "best.pt", map_location="cpu", weights_only=True)
     assert set(ckpt) == {"model", "config", "epoch", "val"}
@@ -254,3 +251,79 @@ def test_gradscaler_all_steps_skipped_aborts(monkeypatch):
     loop, model, opt, batches = _fake_step_env(monkeypatch, nan_calls=set())
     with pytest.raises(RuntimeError, match="non-finite"):
         loop.train_one_epoch(model, batches, opt, _FakeScaler({0, 1, 2}), {"train": {}}, torch.device("cpu"), 0)
+
+
+# ---------------------------------------------------------------- R20: checkpoint selection window
+def _scripted_fit(monkeypatch, tmp_path, maps, select_from, epochs_max, patience):
+    """Run ``fit`` with training/validation stubbed out: epoch e reports val mAP50_95 = maps[e]."""
+    import dccnet.train.loop as loop
+
+    class _DS:
+        def set_epoch(self, e):
+            pass
+
+    class _Loader:
+        dataset = _DS()
+
+    class _Tiny(torch.nn.Module):
+        def __init__(self, cfg):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1))
+
+    seen = []
+
+    def fake_eval(model, val_loader, cfg, device, data_root):
+        e = len(seen)
+        seen.append(e)
+        return {"mAP50": maps[e], "mAP50_95": maps[e], "rbc_count_mae": 1.0, "per_class": {}, "per_class_50_95": {}}
+
+    monkeypatch.setattr(loop, "build_loaders", lambda *a, **k: (_Loader(), _Loader()))
+    monkeypatch.setattr(loop, "DCCellNet", _Tiny)
+    def fake_train(model, loader, optimizer, *a, **k):
+        optimizer.step()  # keep the scheduler's "step after optimizer" order
+        return {**{key: 0.0 for key in loop.LOSS_KEYS}, "nonfinite_steps": 0}
+
+    monkeypatch.setattr(loop, "train_one_epoch", fake_train)
+    monkeypatch.setattr(loop, "evaluate_epoch", fake_eval)
+    cfg = load_config(BASE)
+    cfg["train"].update(epochs_max=epochs_max, patience=patience, select_from_epoch=select_from)
+    summary = loop.fit(cfg, tmp_path / "run", torch.device("cpu"), tmp_path, num_workers=0)
+    rows = [json.loads(l) for l in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()]
+    ckpt = torch.load(tmp_path / "run" / "best.pt", weights_only=False)
+    return summary, rows, ckpt
+
+
+def test_base_yaml_select_from_epoch_is_end_of_cc_ramp():
+    cfg = load_config(BASE)
+    cc = cfg["loss"]["cc"]
+    assert cfg["train"]["select_from_epoch"] == cc["warmup_epochs"] + cc["ramp_epochs"] == 15
+
+
+def test_fit_selects_only_from_select_from_epoch(monkeypatch, tmp_path):
+    # val mAP peaks at epoch 2 and declines afterwards; selection window opens at epoch 4
+    maps = [0.1, 0.5, 0.9, 0.6, 0.4, 0.45, 0.44, 0.43, 0.42, 0.41, 0.40, 0.39]
+    summary, rows, ckpt = _scripted_fit(monkeypatch, tmp_path, maps, select_from=4, epochs_max=12, patience=3)
+    assert summary["best_epoch"] == 5 and ckpt["epoch"] == 5
+    assert summary["select_from_epoch"] == 4
+    assert summary["val"]["mAP50_95"] == pytest.approx(0.45)
+    # epochs 0-3 still validated and logged
+    assert [r["epoch"] for r in rows[:4]] == [0, 1, 2, 3]
+    assert rows[2]["val_mAP50_95"] == pytest.approx(0.9)
+    # patience counted from epoch 4: best 5, bad epochs 6, 7, 8 -> stop after epoch 8
+    assert len(rows) == 9
+
+
+def test_fit_select_from_epoch_clamped_for_short_runs(monkeypatch, tmp_path):
+    summary, rows, _ = _scripted_fit(monkeypatch, tmp_path, [0.3], select_from=15, epochs_max=1, patience=30)
+    assert summary["best_epoch"] == 0 and summary["select_from_epoch"] == 0
+    assert len(rows) == 1
+
+
+def test_early_stopping_ignores_epochs_before_start():
+    es = EarlyStopping(patience=2, start_epoch=3)
+    for e, v in enumerate([0.9, 0.8, 0.7]):
+        assert es.step(v, epoch=e) is False
+        assert not es.should_stop and es.best_epoch is None
+    assert es.step(0.1, epoch=3) is True and es.best_epoch == 3
+    assert es.step(0.05, epoch=4) is False and not es.should_stop
+    assert es.step(0.05, epoch=5) is False and es.should_stop

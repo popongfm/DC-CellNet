@@ -25,6 +25,7 @@ decode:
 train:
   epochs_max: 300
   patience: 30
+  select_from_epoch: 15  # = loss.cc.warmup_epochs + ramp_epochs; best/patience only from here (R20)
   batch: 8
   amp: true
   lr: 1.25e-4
