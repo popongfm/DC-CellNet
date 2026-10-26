@@ -63,6 +63,9 @@ def compute_losses(
                 scope=cc_cfg["scope"],
                 stop_grad_density=bool(cc_cfg["stop_grad_density"]),
                 peak_thr=peak_thr,
+                count_fn=str(cc_cfg.get("count_fn", "sigmoid")),
+                count_center=float(cc_cfg.get("count_center", 0.3)),
+                count_temp=float(cc_cfg.get("count_temp", 0.05)),
             )
             l_cc_bg = cc_background_mass(hm, peak_thr)
             lam_cc = cc_weight(

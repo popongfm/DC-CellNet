@@ -254,7 +254,7 @@ def test_cc_non_divisible_map_hand_value():
         return 0.5 * x * x if x < 1 else x - 0.5
 
     expected = (sl1(0.8 - 1.0) + sl1(0.5) + sl1(0.6 - 2.0)) / 9
-    loss = count_consistency_loss(hm, d, window=4)
+    loss = count_consistency_loss(hm, d, window=4, count_fn="linear")
     assert loss.item() == pytest.approx(expected, rel=1e-6)
 
 
@@ -289,6 +289,9 @@ def _cfg(density=True, cc=True):
                 "window": 8,
                 "stop_grad_density": True,
                 "peak_thr": 0.01,
+                "count_fn": "sigmoid",
+                "count_center": 0.3,
+                "count_temp": 0.05,
                 "warmup_epochs": 10,
                 "ramp_epochs": 5,
             },
@@ -402,24 +405,36 @@ def _exact_density(n, H=64, W=64):
     return d
 
 
+def _peak_free(grad, pts):
+    g = grad.clone()
+    for y, x in pts:
+        g[0, 0, y, x] = 0
+    return g
+
+
+@pytest.mark.parametrize("count_fn", ["linear", "sigmoid"])
 @pytest.mark.parametrize("scope", ["local", "global"])
-def test_cc_floor_background_ignored(scope):
+def test_cc_floor_background_ignored(scope, count_fn):
+    # peaks at H = 1 count exactly 1 (linear) or 1 - 8e-7 (sigmoid at (1 - 0.3) / 0.05 = 14)
     hm, pts = _floor_probe()
     hm.requires_grad_()
     d = _exact_density(3)
-    loss = count_consistency_loss(hm, d, window=32, scope=scope)
-    assert loss.item() == 0.0
+    loss = count_consistency_loss(hm, d, window=32, scope=scope, count_fn=count_fn)
+    assert loss.item() == pytest.approx(0.0, abs=1e-10)
     loss.backward()
-    assert torch.all(hm.grad == 0)
+    assert torch.all(_peak_free(hm.grad, pts) == 0)  # floor plateau: no gradient
+    if count_fn == "linear":
+        assert loss.item() == 0.0 and torch.all(hm.grad == 0)
 
 
-def test_cc_subthreshold_background_max_no_effect():
+@pytest.mark.parametrize("count_fn", ["linear", "sigmoid"])
+def test_cc_subthreshold_background_max_no_effect(count_fn):
     hm, pts = _floor_probe()
     hm[0, 0, 50, 50] = 0.005  # isolated local max below peak_thr, tile (1,1)
     hm.requires_grad_()
     d = _exact_density(3)
-    loss = count_consistency_loss(hm, d, window=32)
-    assert loss.item() == 0.0
+    loss = count_consistency_loss(hm, d, window=32, count_fn=count_fn)
+    assert loss.item() == pytest.approx(0.0, abs=1e-10)
     loss.backward()
     assert hm.grad[0, 0, 50, 50] == 0
 
@@ -458,3 +473,85 @@ def test_compute_losses_cc_bg_logged_not_in_total():
         + L["loss_d"] + 0.5 * L["loss_cc"]
     )
     assert L["loss_total"].item() == pytest.approx(expected.item(), rel=1e-6)
+
+
+# ---------------------------------------------------------------- R21: soft count = sigmoid((H - c) / T)
+def _peaks_at(vals, H=64, W=64):
+    """Isolated peaks (all inside tile 0 of a 32 window) with the given heights, on a zero map."""
+    hm = torch.zeros(1, 1, H, W)
+    pts = [(3, 4), (10, 20), (25, 7), (15, 15), (28, 28)][: len(vals)]
+    for (y, x), v in zip(pts, vals):
+        hm[0, 0, y, x] = v
+    return hm, pts
+
+
+def test_cc_sigmoid_confident_peaks_matching_density_near_zero():
+    hm, _ = _peaks_at([0.95, 0.95, 0.95])
+    d = _exact_density(3)
+    sig = count_consistency_loss(hm, d, window=32)  # default count_fn="sigmoid"
+    lin = count_consistency_loss(hm, d, window=32, count_fn="linear")
+    assert sig.item() == pytest.approx(0.0, abs=1e-8)
+    # linear counts 3 * 0.95 = 2.85 against 3 -> keeps pushing confident peaks toward 1
+    assert lin.item() > 1e-4
+    assert lin.item() == pytest.approx(0.5 * 0.15 ** 2 / 4, rel=1e-5)  # one tile of 2x2 non-zero
+
+
+def test_cc_sigmoid_weak_candidate_gets_larger_upward_gradient_than_confident_peak():
+    hm, pts = _peaks_at([0.95, 0.95, 0.25])  # third is a weak split candidate
+    hm.requires_grad_()
+    d = _exact_density(4)  # under-counted tile
+    loss = count_consistency_loss(hm, d, window=32)
+    assert loss.item() > 0
+    loss.backward()
+    g_conf = hm.grad[0, 0, pts[0][0], pts[0][1]].item()
+    g_weak = hm.grad[0, 0, pts[2][0], pts[2][1]].item()
+    assert g_weak < 0 and g_conf <= 0  # descent raises both
+    assert abs(g_weak) > 10 * abs(g_conf)
+
+
+def test_cc_linear_reproduces_old_soft_count():
+    torch.manual_seed(0)
+    hm = torch.rand(2, 3, 40, 40).clamp(EPS, 1 - EPS)
+    d = torch.rand(2, 3, 40, 40) * 0.02
+    peak = ((hm == F.max_pool2d(hm, 3, stride=1, padding=1)) & (hm > 0.01)).float()
+
+    def tiles(x, w=8):
+        return x.reshape(2, 3, 5, w, 5, w).sum(dim=(3, 5)).reshape(2, 3, 25)
+
+    expected = F.smooth_l1_loss(tiles(hm * peak), tiles(d), beta=1.0)
+    got = count_consistency_loss(hm, d, window=8, count_fn="linear")
+    assert got.item() == pytest.approx(expected.item(), rel=1e-6)
+
+
+def test_cc_sigmoid_value_and_peak_gate():
+    hm, _ = _peaks_at([0.3, 0.005])  # 0.005 is a local max below peak_thr -> excluded
+    d = torch.zeros_like(hm)
+    loss = count_consistency_loss(hm, d, window=32, count_center=0.3, count_temp=0.05)
+    assert loss.item() == pytest.approx(0.5 * 0.5 ** 2 / 4, rel=1e-6)  # sigmoid(0) = 0.5 in one of 4 tiles
+
+
+def test_cc_bad_count_fn_raises():
+    z = torch.zeros(1, 1, 8, 8)
+    with pytest.raises(ValueError):
+        count_consistency_loss(z, z, count_fn="nope")
+
+
+def test_compute_losses_wires_count_fn():
+    t = _batched_targets(SETS)
+    cfg_s, cfg_l = _cfg(True, True), _cfg(True, True)
+    cfg_l["loss"]["cc"]["count_fn"] = "linear"
+    ls = compute_losses(_fake_outputs(True), t, cfg_s, epoch=20)["loss_cc"]
+    ll = compute_losses(_fake_outputs(True), t, cfg_l, epoch=20)["loss_cc"]
+    out = _fake_outputs(True)
+    ref = count_consistency_loss(out["heatmap"], out["density"], window=8, count_fn="linear")
+    assert ll.item() == pytest.approx(ref.item(), rel=1e-6)
+    assert ls.item() != pytest.approx(ll.item(), rel=1e-3)
+
+
+def test_base_yaml_cc_count_keys():
+    from pathlib import Path
+
+    from dccnet.config import load_config
+
+    cc = load_config(Path(__file__).resolve().parents[1] / "configs" / "base.yaml")["loss"]["cc"]
+    assert (cc["count_fn"], cc["count_center"], cc["count_temp"]) == ("sigmoid", 0.3, 0.05)

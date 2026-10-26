@@ -15,6 +15,9 @@ loss:
     window: 32
     stop_grad_density: true
     peak_thr: 0.01
+    count_fn: sigmoid    # per-peak count = sigmoid((H - count_center) / count_temp); "linear" = H (R21)
+    count_center: 0.3
+    count_temp: 0.05
     warmup_epochs: 10
     ramp_epochs: 5
 decode:

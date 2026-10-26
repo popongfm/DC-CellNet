@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 _SCOPES = ("local", "global")
+_COUNT_FNS = ("sigmoid", "linear")
 
 
 def _tile_sums(x: torch.Tensor, wh: int, ww: int) -> torch.Tensor:
@@ -27,14 +28,27 @@ def count_consistency_loss(
     scope: str = "local",
     stop_grad_density: bool = True,
     peak_thr: float = 0.01,
+    count_fn: str = "sigmoid",
+    count_center: float = 0.3,
+    count_temp: float = 0.05,
 ) -> torch.Tensor:
     """SmoothL1 between per-window soft detection counts and density counts.
 
     For image b, class c, tile k:
       * ``P = 1[(H == maxpool3x3(H)) & (H > peak_thr)]`` -- peak mask, computed under
         no_grad (no gradient);
-      * ``N_det = sum_{x in k} H(x) * P(x)`` -- soft count; gradient flows only into
-        the heatmap values at peaks;
+      * ``N_det = sum_{x in k} n(H(x)) * P(x)`` -- soft count; gradient flows only into
+        the heatmap values at peaks. Per-peak contribution ``n`` (R21):
+        ``count_fn="sigmoid"`` (default): ``n(H) = sigmoid((H - count_center) / count_temp)``;
+        ``count_fn="linear"``: ``n(H) = H`` (the pre-R21 behaviour).
+        Why sigmoid: L_cc must count *detections*, not sum peak heights. With ``n = H`` a
+        tile of three confident cells (H = 0.95) counts 2.85 against a density of 3, so
+        L_cc keeps pushing correct peaks toward 1 and, worse, a candidate at 0.25 counts as
+        a quarter cell and the upward pressure is spread over every peak in the tile. With a
+        steep sigmoid around the decode threshold (center 0.3, temp 0.05) a confident peak
+        counts ~1 and is left alone (saturated, ~zero gradient), while a candidate near the
+        threshold sits on the steep part and receives almost all of the gradient -- exactly
+        the split candidates L_cc exists to grow (or, in an over-counted tile, suppress).
       * ``N_den = sum_{x in k} D(x)``, detached when ``stop_grad_density`` (default:
         D is supervised by its own GT; L_cc only pushes H to match it);
       * ``L_cc = mean_{b,c,k} SmoothL1(N_det, N_den; beta=1)``.
@@ -60,6 +74,10 @@ def count_consistency_loss(
     """
     if scope not in _SCOPES:
         raise ValueError(f"scope must be one of {_SCOPES}, got {scope!r}")
+    if count_fn not in _COUNT_FNS:
+        raise ValueError(f"count_fn must be one of {_COUNT_FNS}, got {count_fn!r}")
+    if count_fn == "sigmoid" and not count_temp > 0:
+        raise ValueError(f"count_temp must be > 0, got {count_temp}")
     heatmap = heatmap.float()
     density = density.float()
     H, W = heatmap.shape[-2:]
@@ -73,7 +91,11 @@ def count_consistency_loss(
     with torch.no_grad():
         local_max = heatmap == F.max_pool2d(heatmap, 3, stride=1, padding=1)
         peak = (local_max & (heatmap > peak_thr)).float()
-    n_det = _tile_sums(heatmap * peak, wh, ww)
+    if count_fn == "sigmoid":
+        contrib = torch.sigmoid((heatmap - float(count_center)) / float(count_temp))
+    else:
+        contrib = heatmap
+    n_det = _tile_sums(contrib * peak, wh, ww)
     n_den = _tile_sums(density, wh, ww)
     if stop_grad_density:
         n_den = n_den.detach()
