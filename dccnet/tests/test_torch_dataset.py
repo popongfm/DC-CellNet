@@ -33,11 +33,12 @@ def _sample(tmp_path, name="a.png", w=640, h=480, boxes=((100, 100, 140, 140),),
 class FakeRng:
     """Deterministic stand-in: no flips, fixed rot90 k, uniform() returns its upper bound."""
 
-    def __init__(self, k=0):
+    def __init__(self, k=0, flip=False):
         self.k = k
+        self.flip = flip
 
     def random(self):
-        return 0.99
+        return 0.0 if self.flip else 0.99
 
     def integers(self, low, high=None):
         return self.k
@@ -193,3 +194,51 @@ def test_collate_stacks(tmp_path):
     # works through a real DataLoader
     batch = next(iter(torch.utils.data.DataLoader(ds, batch_size=2, collate_fn=collate_fn)))
     assert batch[0].shape == (2, 3, 640, 640)
+
+
+def test_epoch_changes_augmentation(tmp_path):
+    aug = {**NO_AUG, "hflip": True, "vflip": True, "rot90": True, "scale": 0.2, "translate": 0.1}
+    ds = CellDataset([_sample(tmp_path)], aug=aug)
+    ds.set_epoch(0)
+    a, _, _ = ds[0]
+    a2, _, _ = ds[0]
+    assert torch.equal(a, a2)
+    ds.set_epoch(1)
+    b, _, _ = ds[0]
+    assert not torch.equal(a, b)
+    ds.set_epoch(0)
+    c, _, _ = ds[0]
+    assert torch.equal(a, c)
+
+
+def test_zero_area_box_is_dropped(tmp_path):
+    s = _sample(tmp_path, boxes=((100, 100, 140, 140), (300, 300, 300, 300), (200, 200, 200.4, 200.4)), labels=(0, 1, 2))
+    for aug in (None, {**NO_AUG, "scale": 0.1}):
+        _, t, _ = CellDataset([s], aug=aug)[0]
+        c, l = _active_circles(t)
+        assert len(c) == 1 and l.tolist() == [0]
+
+
+def test_warped_disc_centroid_matches_circle(tmp_path, monkeypatch):
+    S = 640
+    bg = 114
+    cx, cy, r = 200.0, 300.0, 30.0
+    yy, xx = np.mgrid[0:S, 0:S]
+    disc = (xx + 0.5 - cx) ** 2 + (yy + 0.5 - cy) ** 2 <= r**2
+    img = np.full((S, S, 3), bg, dtype=np.uint8)
+    img[disc] = 255
+    p = tmp_path / "disc.png"
+    assert cv2.imwrite(str(p), img)
+    sample = Sample(p, "t", S, S, np.array([[cx - r, cy - r, cx + r, cy + r]], np.float32), np.array([0], np.int64))
+    ds = CellDataset([sample], aug={**NO_AUG, "hflip": True, "vflip": True, "scale": 0.1, "translate": 0.1})
+    monkeypatch.setattr(CellDataset, "_make_rng", lambda self, index: FakeRng(0, flip=True))
+    out, t, _ = ds[0]
+    (circle,), _ = _active_circles(t)
+    # hflip+vflip -> (440, 340); scale 1.1 about 320 -> (452, 342); translate +64 -> (516, 406); r = 33
+    np.testing.assert_allclose(circle, [516.0, 406.0, 33.0], atol=1e-3)
+    gray = out[0].numpy() * 255.0 - bg
+    w = np.clip(gray, 0, None)
+    ys, xs = np.mgrid[0:S, 0:S]
+    mx = (w * (xs + 0.5)).sum() / w.sum()
+    my = (w * (ys + 0.5)).sum() / w.sum()
+    assert abs(mx - circle[0]) < 0.25 and abs(my - circle[1]) < 0.25

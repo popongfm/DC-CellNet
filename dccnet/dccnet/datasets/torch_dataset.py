@@ -11,7 +11,10 @@ Conventions (binding for training and evaluation):
   rot90 (k uniform in 0..3, CCW), then a random affine (scale about the center + translation).
   Cells whose center ends up outside ``[0, S)`` are dropped; cells whose circle crosses the image
   edge get ``radius_valid=False``.
-* RNG: ``np.random.default_rng([torch.initial_seed() % 2**32, index])`` per ``__getitem__``.
+* RNG: ``np.random.default_rng([torch.initial_seed() % 2**32, epoch, index])`` per ``__getitem__``;
+  call ``set_epoch(epoch)`` each epoch so augmentation differs across epochs (default epoch 0).
+* Cells with ``r' < 0.5`` px (after letterbox / augmentation) are dropped, so zero-area boxes never
+  reach ``build_targets``.
 * ``unletterbox`` inverts only the letterbox mapping (evaluation never augments).
 """
 from __future__ import annotations
@@ -26,6 +29,7 @@ from dccnet.datasets.targets import build_targets
 from dccnet.types import Sample
 
 _PAD_VALUE = 114
+_MIN_RADIUS = 0.5
 
 
 def unletterbox(circles: np.ndarray, meta: dict) -> np.ndarray:
@@ -55,12 +59,16 @@ class CellDataset(Dataset):
         self.img_size = int(img_size)
         self.aug = aug
         self.stride = int(stride)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def _make_rng(self, index: int):
-        return np.random.default_rng([torch.initial_seed() % 2**32, int(index)])
+        return np.random.default_rng([torch.initial_seed() % 2**32, int(self.epoch), int(index)])
 
     def __getitem__(self, index: int):
         sample = self.samples[index]
@@ -87,6 +95,10 @@ class CellDataset(Dataset):
 
         if self.aug is not None:
             canvas, c, labels, valid = self._augment(canvas, c, labels, valid, self._make_rng(index))
+
+        small = c[:, 2] < _MIN_RADIUS
+        if small.any():
+            c, labels, valid = c[~small], labels[~small], valid[~small]
 
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         image = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1)).astype(np.float32) / 255.0)
