@@ -1,0 +1,40 @@
+model:
+  backbone: resnet50
+  pretrained: true
+  repr: circle
+  heads:
+    density: true
+loss:
+  lambda_r: 0.1
+  lambda_o: 1.0
+  lambda_d: 1.0
+  lambda_cc: 0.5
+  cc:
+    enabled: true
+    scope: local
+    window: 32
+    stop_grad_density: true
+    warmup_epochs: 10
+    ramp_epochs: 5
+decode:
+  score_thr: 0.3
+  low_thr: 0.1
+  nms: none
+  density_fill: false
+train:
+  epochs_max: 300
+  patience: 30
+  batch: 8
+  amp: true
+  lr: 1.25e-4
+  seed: 0
+aug:
+  hflip: true
+  vflip: true
+  rot90: true
+  scale: 0.2
+  translate: 0.1
+  stain: false
+data:
+  img_size: 640
+  stride: 4
