@@ -59,3 +59,30 @@ debug the evaluator / class mapping before M2.
 - TXL internal near-duplicates: 6 pairs with Hamming <= 6 (4 to 6), listed in `dedupe_report.csv`; 2 of them cross
   train/val splits. They are reported only, not removed.
 - TXL's own label files use WBC=0, RBC=1, Platelet=2; the YOLO copy is re-written in our order (0 RBC, 1 WBC, 2 Platelets).
+
+## M2 — synthetic go/no-go (run on Windows)
+Question: does the local count-consistency loss `L_cc` help separate overlapping cells? Three arms
+(`configs/exp_m2_circlenet.yaml`: no density head; `exp_m2_density.yaml`: density head, no `L_cc`;
+`exp_m2_dccell.yaml`: density head + `L_cc`) x seeds 0, 1, 2 = 9 runs on the synthetic overlapping-disc set
+(400 train / 100 val / 200 test; generated automatically if `data\splits\synthetic.json` is missing).
+
+Anaconda Prompt:
+
+    conda activate dccnet
+    cd /d C:\Research\dccnet
+    scripts\run_m2.bat
+
+Per run it trains (`runs\exp_m2_<arm>_s<seed>\`), predicts val, sweeps the score threshold on val, predicts test and
+evaluates test at the swept `best_thr`; progress goes to the console and `runs\m2_runner.log`.
+
+- **Resume:** just re-run `scripts\run_m2.bat`. Runs with `summary_test.json` are skipped; a run with `summary.json`
+  skips training. It stops at the first failing command. If a run was killed mid-training (a run folder with
+  `best.pt` but no `summary.json`), delete that one folder `runs\exp_m2_<arm>_s<seed>` before re-running.
+- **Duration:** 9 runs x at most 60 epochs (early stopping, patience 20) on the 5060 Ti; plan for several hours and
+  leave the machine alone. The first command output tells you per-epoch time.
+- **Send back:** nothing. Claude reads `runs\` from the shared folder and runs
+  `python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2_go_no_go.md`
+  (GO iff the paired-bootstrap 95% CI of the RBC |count error| difference dccell - circlenet is entirely below 0 and
+  pooled recall in overlap bins 2+3 is higher for dccell).
+- `scripts/run_m2.sh` is the bash twin (used for CPU smoke tests). Optional env knobs, off by default: `M2_SEEDS`,
+  `M2_CONFIGS`, `M2_DEVICE`, `M2_TRAIN_ARGS`, `M2_PREDICT_ARGS`, `M2_DATA_ROOT`, `M2_RUNS_DIR`, `M2_CONFIG_DIR`, `M2_PYTHON`.
