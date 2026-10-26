@@ -21,7 +21,7 @@ def parse_float_list(raw: str) -> List[float]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Grid-search score/NMS thresholds for Faster R-CNN evaluator.")
+    parser = argparse.ArgumentParser(description="Grid-search score/NMS thresholds for the ResNet101-FPN evaluator.")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="Path to trained checkpoint.")
     parser.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT, help="YOLO-format dataset root.")
     parser.add_argument("--split", default="test", choices=["train", "valid", "test"], help="Dataset split.")

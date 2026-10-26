@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 import argparse
-import os
-import re
-from pathlib import Path
 from typing import List
 
 import torch
 from PIL import Image, ImageDraw
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.faster_rcnn import fasterrcnn_resnet50_fpn
 from torchvision.transforms.functional import to_tensor
+
+from train_detector import MODEL_DISPLAY_NAME, create_model, load_checkpoint_into_model, normalize_path
 
 
 DEFAULT_OUTPUT_IMAGE = r"C:\Users\usEr\Downloads\Research\CNN\prediction.jpg"
@@ -19,25 +16,8 @@ DEFAULT_CHECKPOINT = r"C:\Users\usEr\Downloads\Research\CNN\outputs\best_model.p
 DEFAULT_IMAGE = r"C:\Users\usEr\Downloads\Research\blood-cell-detection-datatset\test\images\BloodImage_00038_jpg.rf.ffa23e4b5b55b523367f332af726eae8.jpg"
 
 
-def normalize_path(path_str: str) -> Path:
-    if os.name == "nt":
-        return Path(path_str)
-    if re.match(r"^[A-Za-z]:\\", path_str):
-        drive_letter = path_str[0].lower()
-        rest = path_str[2:].replace("\\", "/").lstrip("/")
-        return Path(f"/mnt/{drive_letter}/{rest}")
-    return Path(path_str)
-
-
-def create_model(num_classes: int):
-    model = fasterrcnn_resnet50_fpn(weights=None, weights_backbone=None)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    return model
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run inference with a trained Faster R-CNN checkpoint.")
+    parser = argparse.ArgumentParser(description=f"Run inference with a trained {MODEL_DISPLAY_NAME} checkpoint.")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="Path to best_model.pt or last_model.pt")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Input image path")
     parser.add_argument("--output", default=DEFAULT_OUTPUT_IMAGE, help="Output image path with drawn boxes")
@@ -82,8 +62,8 @@ def main() -> None:
         raise ValueError("Checkpoint does not contain class_names.")
 
     num_classes = len(class_names) + 1
-    model = create_model(num_classes=num_classes)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model = create_model(num_classes=num_classes, pretrained=False)
+    load_checkpoint_into_model(model, checkpoint, checkpoint_path)
     model.roi_heads.score_thresh = args.model_score_threshold
     model.roi_heads.nms_thresh = args.nms_iou_threshold
     model.roi_heads.detections_per_img = args.max_detections

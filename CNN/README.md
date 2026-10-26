@@ -1,6 +1,6 @@
-# Blood Cell Detection CNN (Faster R-CNN)
+# Blood Cell Detection CNN (ResNet101-FPN)
 
-This project trains a CNN-based object detector on your YOLO-format blood-cell dataset:
+This project trains a ResNet101-FPN CNN object detector on your YOLO-format blood-cell dataset:
 
 - Dataset: `C:\Users\usEr\Downloads\Research\blood-cell-detection-datatset`
 - Project: `C:\Users\usEr\Downloads\Research\CNN`
@@ -30,6 +30,8 @@ Training saves:
 
 - `outputs\last_model.pt`
 - `outputs\best_model.pt`
+
+Important: checkpoints from the old ResNet50 version are not compatible with this ResNet101 model. Retrain before running prediction or evaluation.
 
 ## 3) Run prediction on one image
 
@@ -77,5 +79,5 @@ This runs a grid search over threshold pairs and saves:
 ## Notes
 
 - The script reads `data.yaml` and uses classes: `Platelets`, `RBC`, `WBC`.
-- YOLO labels are automatically converted into Faster R-CNN bounding boxes.
+- YOLO labels are automatically converted into detector bounding boxes.
 - For lower VRAM, reduce `--batch-size` to `1`.

@@ -13,15 +13,17 @@ import yaml
 from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+from torchvision.models import ResNet101_Weights
 from torchvision.models.detection import FasterRCNN
-from torchvision.models.detection.faster_rcnn import FasterRCNN_ResNet50_FPN_Weights
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.faster_rcnn import fasterrcnn_resnet50_fpn
+from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
+from torchvision.ops.misc import FrozenBatchNorm2d
 from torchvision.transforms.functional import to_tensor
 
 
 DEFAULT_DATASET_ROOT = r"C:\Users\usEr\Downloads\Research\blood-cell-detection-datatset"
 DEFAULT_OUTPUT_DIR = r"C:\Users\usEr\Downloads\Research\CNN\outputs"
+MODEL_ARCH = "fasterrcnn_resnet101_fpn"
+MODEL_DISPLAY_NAME = "ResNet101-FPN detector"
 
 
 def normalize_path(path_str: str) -> Path:
@@ -126,7 +128,7 @@ class YoloDetectionDataset(Dataset):
                 if x2 <= x1 or y2 <= y1:
                     continue
                 boxes_list.append([x1, y1, x2, y2])
-                # Reserve class 0 for background as required by Faster R-CNN.
+                # Reserve class 0 for the detector background class.
                 labels_list.append(int(class_id) + 1)
 
         if not boxes_list:
@@ -147,11 +149,33 @@ def collate_fn(batch):
 
 
 def create_model(num_classes: int, pretrained: bool = True) -> FasterRCNN:
-    weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT if pretrained else None
-    model = fasterrcnn_resnet50_fpn(weights=weights, weights_backbone=None)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    return model
+    weights = ResNet101_Weights.DEFAULT if pretrained else None
+    trainable_layers = 3 if pretrained else 5
+    norm_layer = FrozenBatchNorm2d if pretrained else nn.BatchNorm2d
+    backbone = resnet_fpn_backbone(
+        backbone_name="resnet101",
+        weights=weights,
+        norm_layer=norm_layer,
+        trainable_layers=trainable_layers,
+    )
+    return FasterRCNN(backbone, num_classes=num_classes)
+
+
+def load_checkpoint_into_model(model: nn.Module, checkpoint: Dict, checkpoint_path: Path | None = None) -> None:
+    checkpoint_arch = checkpoint.get("model_arch")
+    checkpoint_label = f" '{checkpoint_path}'" if checkpoint_path is not None else ""
+    if checkpoint_arch and checkpoint_arch != MODEL_ARCH:
+        raise RuntimeError(
+            f"Checkpoint{checkpoint_label} was saved with architecture '{checkpoint_arch}', "
+            f"but this code expects '{MODEL_ARCH}'. Retrain with train_detector.py after switching to ResNet101."
+        )
+    try:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Checkpoint{checkpoint_label} is not compatible with the {MODEL_DISPLAY_NAME}. "
+            "Retrain with train_detector.py to create a new ResNet101 checkpoint."
+        ) from exc
 
 
 def move_to_device(images, targets, device: torch.device):
@@ -201,7 +225,7 @@ def validate_loss(model: nn.Module, dataloader: DataLoader, device: torch.device
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a Faster R-CNN blood cell detector from YOLO labels.")
+    parser = argparse.ArgumentParser(description="Train a ResNet101-FPN blood cell detector from YOLO labels.")
     parser.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT, help="Path to YOLO-format dataset root.")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Folder to save checkpoints.")
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")
@@ -218,13 +242,13 @@ def parse_args() -> argparse.Namespace:
         "--pretrained",
         dest="pretrained",
         action="store_true",
-        help="Use COCO-pretrained Faster R-CNN weights before fine-tuning.",
+        help="Use ImageNet-pretrained ResNet101 backbone weights before fine-tuning.",
     )
     parser.add_argument(
         "--no-pretrained",
         dest="pretrained",
         action="store_false",
-        help="Disable COCO-pretrained initialization.",
+        help="Disable ImageNet-pretrained ResNet101 backbone initialization.",
     )
     parser.set_defaults(pretrained=True)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="cuda or cpu")
@@ -246,6 +270,7 @@ def main() -> None:
     num_classes = len(class_names) + 1
     print(f"Classes: {class_names}")
     print(f"Using dataset: {dataset_root}")
+    print(f"Model: {MODEL_DISPLAY_NAME}")
 
     train_dataset = YoloDetectionDataset(dataset_root, split="train")
     val_dataset = YoloDetectionDataset(dataset_root, split="valid")
@@ -284,6 +309,7 @@ def main() -> None:
 
         checkpoint = {
             "epoch": epoch,
+            "model_arch": MODEL_ARCH,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "class_names": class_names,

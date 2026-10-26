@@ -25,3 +25,17 @@ Machine_Learning_Model_Comparison_YOLO_vs_CNN*
 # Local Codex workspace notes.
 SKILL.md
 references/
+
+# DC-CellNet / hygiene
+dccnet/data/
+dccnet/runs/
+*.pt
+*.zip
+*.pdf
+__pycache__/
+*.cache
+BCCD/dataset-master/
+BCCD/dataset2-master/
+BCCD/**/dataset/
+BCCD/**/runs/
+BCCD/YOLO/yolo_dataset/

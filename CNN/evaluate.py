@@ -13,8 +13,10 @@ from torchvision.ops import box_iou
 
 from train_detector import (
     DEFAULT_DATASET_ROOT,
+    MODEL_DISPLAY_NAME,
     collate_fn,
     create_model,
+    load_checkpoint_into_model,
     normalize_path,
     read_class_names,
     YoloDetectionDataset,
@@ -26,7 +28,7 @@ DEFAULT_JSON_OUTPUT = r"C:\Users\usEr\Downloads\Research\CNN\outputs\eval_test_m
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate Faster R-CNN blood cell detector on a dataset split.")
+    parser = argparse.ArgumentParser(description=f"Evaluate {MODEL_DISPLAY_NAME} on a dataset split.")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="Path to best_model.pt or last_model.pt")
     parser.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT, help="Path to YOLO-format dataset root.")
     parser.add_argument("--split", default="test", choices=["train", "valid", "test"], help="Dataset split.")
@@ -98,7 +100,7 @@ def evaluate(args: argparse.Namespace) -> Dict:
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model = create_model(num_classes=num_classes, pretrained=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    load_checkpoint_into_model(model, checkpoint, checkpoint_path)
     model.roi_heads.score_thresh = args.model_score_threshold
     model.roi_heads.nms_thresh = args.nms_iou_threshold
     model.roi_heads.detections_per_img = args.max_detections
