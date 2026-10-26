@@ -173,3 +173,28 @@ def test_split_relative_to_data_root(world):
                         "--out", str(world["out"])], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "VERDICT: GO" in r.stdout
+
+
+def test_discover_ignores_aborted_folders(world):
+    s, dr = world["samples"], world["data_root"]
+    _write_run(world["runs"], "dccell", 0, _preds(s, dr, False))
+    (world["runs"] / "exp_m2_dccell_s0_aborted_123").mkdir()
+    (world["runs"] / "exp_m2_dccell_s1_aborted_77").mkdir()
+    found = compare_runs.discover_runs(world["runs"], "exp_m2_")
+    assert {a: sorted(v) for a, v in found.items()} == {"dccell": [0]}
+
+
+def test_corrupt_json_run_is_skipped_with_warning(world):
+    s, dr = world["samples"], world["data_root"]
+    _write_run(world["runs"], "circlenet", 0, _preds(s, dr, True))
+    _write_run(world["runs"], "dccell", 0, _preds(s, dr, False))
+    (world["runs"] / "exp_m2_dccell_s0" / "preds_test.json").write_text('[{"image": ')
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"])
+    assert "dccell" not in res["arms"]
+    assert any("exp_m2_dccell_s0" in w and "unreadable" in w for w in res["warnings"])
+
+
+def test_report_states_bootstrap_n(world):
+    _fill(world, cand_drops_middle=False, seeds=(0,))
+    res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"], n_boot=50)
+    assert "n=50, seed 0" in compare_runs.render(res)[0]

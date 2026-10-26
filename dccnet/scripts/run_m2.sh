@@ -45,6 +45,11 @@ for cfg in $CONFIGS; do
       log "$tag: done already, skipping"
       continue
     fi
+    if [ -f "$run/best.pt" ] && [ ! -f "$run/summary.json" ]; then
+      aborted="${run}_aborted_$(date +%s)"
+      log "$tag: aborted earlier run found, moving it to $aborted and training fresh"
+      mv "$run" "$aborted"
+    fi
     if [ ! -f "$run/summary.json" ]; then
       log "$tag: train"
       "$PY" scripts/train.py --config "$CFGDIR/exp_m2_${cfg}.yaml" --seed "$seed" --data-root "$DATA" \

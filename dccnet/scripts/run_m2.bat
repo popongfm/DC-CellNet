@@ -49,6 +49,11 @@ if exist "%RUN%\summary_test.json" (
   call :log %TAG%: done already, skipping
   exit /b 0
 )
+set "ABORT=%TAG%_aborted_%RANDOM%"
+if exist "%RUN%\best.pt" if not exist "%RUN%\summary.json" (
+  call :log %TAG%: aborted earlier run found, renaming folder to %ABORT% and training fresh
+  ren "%RUN%" "%ABORT%" || exit /b 1
+)
 if exist "%RUN%\summary.json" (
   call :log %TAG%: summary.json exists, skipping train
 ) else (
@@ -60,7 +65,7 @@ call :log %TAG%: predict val
 call :log %TAG%: sweep threshold on val
 "%M2_PYTHON%" scripts\evaluate.py --split "%SPLIT%" --subset val --preds "%RUN%\preds_val.json" --data-root "%M2_DATA_ROOT%" --out "%RUN%\sweep_val.json" --sweep-thr || exit /b 1
 set "THR="
-for /f "usebackq delims=" %%T in (`"%M2_PYTHON%" -c "import json,sys; print(json.load(open(sys.argv[1]))['best_thr'])" "%RUN%\sweep_val.json"`) do set "THR=%%T"
+for /f "usebackq delims=" %%T in (`call "%M2_PYTHON%" -c "import json,sys; print(json.load(open(sys.argv[1]))['best_thr'])" "%RUN%\sweep_val.json"`) do set "THR=%%T"
 if not defined THR (
   call :log %TAG%: could not read best_thr from sweep_val.json
   exit /b 1

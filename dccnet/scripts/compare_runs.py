@@ -130,8 +130,10 @@ def compare(runs_dir: Path, prefix: str, split: Path, data_root: Path, baseline:
         for seed, d in dirs.items():
             try:
                 loaded.setdefault(arm, {})[seed] = load_run(d, samples, data_root)
-            except FileNotFoundError as e:
-                warnings.append(f"{d.name}: incomplete run skipped ({Path(e.filename).name if e.filename else e})")
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                why = (f"missing {Path(e.filename).name}" if isinstance(e, FileNotFoundError) and e.filename
+                       else f"unreadable file: {e}")
+                warnings.append(f"{d.name}: incomplete run skipped ({why})")
     for arm, runs in loaded.items():
         for seed, r in runs.items():
             if r["summary_mae"] is not None and abs(r["summary_mae"] - r["mae"]) > 1e-6:
@@ -142,7 +144,7 @@ def compare(runs_dir: Path, prefix: str, split: Path, data_root: Path, baseline:
                                 f"selected before full L_cc weight")
     arms = {a: summarize_arm(r) for a, r in loaded.items()}
     res = {"arms": arms, "baseline": baseline, "candidate": candidate, "warnings": warnings,
-           "gate": None, "diagnostic": None, "n_test_images": len(samples)}
+           "gate": None, "diagnostic": None, "n_boot": n_boot, "n_test_images": len(samples)}
     missing = [a for a in (baseline, candidate) if a not in loaded]
     if missing:
         warnings.append(f"gate not evaluated: no complete runs for arm(s) {missing}")
@@ -166,14 +168,14 @@ def _pm(m, s, nd=4) -> str:
                                                        else f"{m:.{nd}f} ± {s:.{nd}f}")
 
 
-def _gate_block(g: dict, cand: str, base: str) -> list[str]:
+def _gate_block(g: dict, cand: str, base: str, n_boot: int) -> list[str]:
     if "diff_ci" not in g:
         return [f"- not evaluated: {g.get('reason')}"]
     return [
         f"- seeds used: {g['seeds']}, test images: {g['n_images']}",
         f"- RBC |count error| (per-image, mean over seeds): {cand} {_f(g['candidate_mae'])} vs {base} "
         f"{_f(g['baseline_mae'])}; difference {_f(g['diff'])}",
-        f"- paired bootstrap 95% CI of the difference (n=1000, seed 0): [{_f(g['diff_ci'][0])}, "
+        f"- paired bootstrap 95% CI of the difference (n={n_boot}, seed 0): [{_f(g['diff_ci'][0])}, "
         f"{_f(g['diff_ci'][1])}] -> upper < 0: **{'yes' if g['ok_mae'] else 'no'}**",
         f"- pooled recall, overlap bins 2+3 (n_gt = {g['n_gt_ge2']} over seeds): {cand} "
         f"{_f(g['candidate_recall_ge2'])} (95% CI [{_f(g['candidate_recall_ci'][0])}, "
@@ -199,12 +201,12 @@ def render(res: dict) -> tuple[str, str]:
     L += ["", "Overlap bin = number of other GT circles a cell overlaps (0..3+). Recall at IoU 0.5.", "",
           f"## Gate: {cand} vs {base}", ""]
     g = res["gate"]
-    L += _gate_block(g, cand, base)
+    L += _gate_block(g, cand, base, res["n_boot"])
     verdict = f"VERDICT: {g['verdict']} ({cand} vs {base})"
     L += ["", f"**{verdict}**", ""]
     if res["diagnostic"]:
         L += ["## Diagnostic: density vs " + base + " (not part of the gate)", ""]
-        L += _gate_block(res["diagnostic"], "density", base)
+        L += _gate_block(res["diagnostic"], "density", base, res["n_boot"])
         L.append("")
     if res["warnings"]:
         L += ["## Warnings", ""] + [f"- ⚠ {w}" for w in res["warnings"]] + [""]

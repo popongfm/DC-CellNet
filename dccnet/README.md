@@ -72,12 +72,28 @@ Anaconda Prompt:
     cd /d C:\Research\dccnet
     scripts\run_m2.bat
 
+**Windows smoke test first** (about 10-20 minutes; checks the whole pipeline on 1 seed and 1 epoch before the real
+run). It writes to `runs_smoke\`, so the real `runs\` stays clean:
+
+    set M2_SEEDS=0
+    set M2_TRAIN_ARGS=--epochs-max 1
+    set M2_RUNS_DIR=runs_smoke
+    scripts\run_m2.bat
+
+If it ends with `ALL DONE`, clear the knobs (same Anaconda Prompt, or just open a new one) and start the real run:
+
+    set M2_SEEDS=
+    set M2_TRAIN_ARGS=
+    set M2_RUNS_DIR=
+    scripts\run_m2.bat
+
 Per run it trains (`runs\exp_m2_<arm>_s<seed>\`), predicts val, sweeps the score threshold on val, predicts test and
 evaluates test at the swept `best_thr`; progress goes to the console and `runs\m2_runner.log`.
 
 - **Resume:** just re-run `scripts\run_m2.bat`. Runs with `summary_test.json` are skipped; a run with `summary.json`
   skips training. It stops at the first failing command. If a run was killed mid-training (a run folder with
-  `best.pt` but no `summary.json`), delete that one folder `runs\exp_m2_<arm>_s<seed>` before re-running.
+  `best.pt` but no `summary.json`), the script renames that folder to `exp_m2_<arm>_s<seed>_aborted_<n>` and trains
+  it fresh; `compare_runs` ignores such folders and you may delete them manually later.
 - **Duration:** 9 runs x at most 60 epochs (early stopping, patience 20) on the 5060 Ti; plan for several hours and
   leave the machine alone. The first command output tells you per-epoch time.
 - **Send back:** nothing. Claude reads `runs\` from the shared folder and runs
