@@ -10,6 +10,11 @@ DC-CellNet research code for blood-smear cell detection (design spec and plan in
 - `scripts/check_env.py`: prints torch version, CUDA availability and GPU name; exit 1 if no CUDA.
 - `scripts/disk_report.py <root> --top 40 --out report.md`: read-only disk usage report
   (largest files, per-folder totals, zip-next-to-folder duplicates). Standard library only.
+- `scripts/train.py --config C [--seed S] [--device cuda] [--data-root data] [--runs-dir runs] [--run-name NAME]
+  [--epochs-max N] [--num-workers 0]`: trains DC-CellNet on `<data-root>/<data.split>` ("train"/"val") and writes
+  `runs/<run-name>/` (default `<config stem>_s<seed>`): `config.yaml, git_hash.txt, metrics.jsonl, best.pt, summary.json`.
+- `scripts/predict.py --run runs/<exp> --split data/splits/pooled.json --subset test --data-root data --out preds.json
+  [--batch 8]`: evaluator records from `best.pt` (score >= 0.001) for `scripts/evaluate.py`.
 
 `dccnet/data/` and `dccnet/runs/` are git-ignored.
 

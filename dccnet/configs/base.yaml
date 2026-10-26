@@ -39,3 +39,4 @@ aug:
 data:
   img_size: 640
   stride: 4
+  split: splits/pooled.json  # relative to --data-root
