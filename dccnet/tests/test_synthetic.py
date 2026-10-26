@@ -53,3 +53,47 @@ def test_overlap_bins_all_populated(tmp_path):
     lv = np.concatenate(lv)
     for k in range(4):
         assert (lv == k).sum() > 0, f"bin {k} empty"
+
+
+def _disc_centroid(cls, cx, cy, r, size=128):
+    """Weighted centroid (edge convention: pixel i covers [i, i+1), centre i + 0.5) of one drawn cell."""
+    from dccnet.datasets import synthetic as syn
+
+    bg = np.asarray(syn.BG_RGB, np.float32)
+    img = np.empty((size, size, 3), np.float32)
+    img[:] = bg
+    syn._draw_cell(img, np.random.default_rng(0), cls, cx, cy, r)
+    w = np.abs(img - bg).sum(axis=2).astype(np.float64)
+    ys, xs = np.mgrid[0:size, 0:size] + 0.5
+    return (w * xs).sum() / w.sum(), (w * ys).sum() / w.sum()
+
+
+def test_drawn_disc_centroid_matches_gt_center():
+    from dccnet.datasets.synthetic import PLT, RBC
+
+    rng = np.random.default_rng(42)
+    for cls, r in [(PLT, 7.3), (RBC, 21.6)]:  # PLT: uniform fill; RBC: fill + rim + pale centre (all concentric)
+        for _ in range(5):
+            cx, cy = rng.uniform(50, 78, 2)
+            gx, gy = _disc_centroid(cls, float(cx), float(cy), r)
+            assert abs(gx - cx) < 0.15 and abs(gy - cy) < 0.15, (cls, cx, cy, gx, gy)
+
+
+def test_synthetic_version_constant():
+    from dccnet.datasets.synthetic import SYNTHETIC_VERSION
+
+    assert SYNTHETIC_VERSION == "2"
+
+
+def test_make_synthetic_script_writes_version(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import make_synthetic as ms
+
+    monkeypatch.setattr(ms, "SIZES", {"train": 1, "val": 1, "test": 1})
+    out = tmp_path / "data" / "synthetic"
+    ms.main(["--out", str(out), "--data-root", str(tmp_path / "data"), "--img-size", "128"])
+    assert (out / "VERSION").read_text() == "2"  # no newline: read by cmd's `set /p`
+    assert (tmp_path / "data" / "splits" / "synthetic.json").exists()
