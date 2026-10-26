@@ -11,6 +11,9 @@ from .neck import FPNLite
 
 NUM_CLASSES = 3
 NECK_CH = 128
+# ImageNet statistics of the pretrained ResNet-50 (torchvision), RGB order
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 class DCCellNet(nn.Module):
@@ -21,6 +24,9 @@ class DCCellNet(nn.Module):
             raise NotImplementedError(f"model.repr={mcfg['repr']!r} is planned for M3")
         if mcfg.get("backbone", "resnet50") != "resnet50":
             raise NotImplementedError(f"model.backbone={mcfg['backbone']!r} is planned for M3")
+        # non-persistent: constants, kept out of state_dict so checkpoints are unaffected
+        self.register_buffer("pixel_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
         self.backbone = ResNet50Backbone(pretrained=bool(mcfg.get("pretrained", True)))
         self.neck = FPNLite(ResNet50Backbone.out_channels, NECK_CH)
         heads = {
@@ -33,9 +39,11 @@ class DCCellNet(nn.Module):
         self.heads = nn.ModuleDict(heads)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        """``x``: (B,3,H,W) RGB in [0,1] (as ``CellDataset`` yields); ImageNet-normalized here."""
         h, w = x.shape[-2:]
         if h % 32 or w % 32:
             raise ValueError(f"input size must be divisible by 32, got {h}x{w}")
+        x = (x - self.pixel_mean.to(x.dtype)) / self.pixel_std.to(x.dtype)
         f = self.neck(self.backbone(x))
         out = {
             "heatmap": torch.sigmoid(self.heads["heatmap"](f).float()).clamp(1e-4, 1 - 1e-4),

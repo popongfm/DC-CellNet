@@ -63,10 +63,13 @@ def test_outputs_float32_under_autocast(model):
 def test_initial_heatmap_mean():
     # Train-mode BN (batch statistics) is what the first training step sees; eval-mode BN with
     # untrained running stats inflates activations and says nothing about the head init.
+    # Input is a realistic RGB image in [0,1] (normalized inside forward). Expected mean stays
+    # sigmoid(-2.19) ~= 0.10: the BN after the stem re-standardizes, so the ImageNet normalization
+    # does not move it (measured 0.1013 both before and after normalization was added).
     torch.manual_seed(0)
     m = DCCellNet(_cfg()).train()
     with torch.no_grad():
-        out = m(torch.randn(2, 3, 256, 256))
+        out = m(torch.rand(2, 3, 256, 256))
     assert abs(out["heatmap"].mean().item() - 0.10) < 0.03
 
 
@@ -98,3 +101,24 @@ def test_not_implemented():
 def test_bad_input_size(model):
     with pytest.raises(ValueError, match="100"):
         model(torch.randn(1, 3, 100, 128))
+
+
+def test_imagenet_normalization_applied_in_forward():
+    m = DCCellNet(_cfg()).eval()
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    assert torch.equal(m.pixel_mean, mean) and torch.equal(m.pixel_std, std)
+    # constants, not weights: old checkpoints without them still load strictly
+    assert not any(k.startswith("pixel_") for k in m.state_dict())
+    seen = {}
+    orig = m.backbone.forward
+
+    def spy(x):
+        seen["x"] = x.clone()
+        return orig(x)
+
+    m.backbone.forward = spy
+    x = torch.rand(1, 3, 64, 64)
+    with torch.no_grad():
+        m(x)
+    assert torch.allclose(seen["x"], (x - mean) / std, atol=1e-6)
