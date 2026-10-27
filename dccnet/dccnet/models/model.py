@@ -6,11 +6,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from .backbone import ResNet50Backbone
-from .heads import DENSITY_BIAS, HEATMAP_BIAS, LOG_R_BIAS, Head
+from .heads import DENSITY_BIAS, HEATMAP_BIAS, LOG_R_BIAS, DeepDensityHead, Head
 from .neck import FPNLite
 
 NUM_CLASSES = 3
 NECK_CH = 128
+DENSITY_BRANCHES = ("shared", "detached")
 # ImageNet statistics of the pretrained ResNet-50 (torchvision), RGB order
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -29,13 +30,18 @@ class DCCellNet(nn.Module):
         self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
         self.backbone = ResNet50Backbone(pretrained=bool(mcfg.get("pretrained", True)))
         self.neck = FPNLite(ResNet50Backbone.out_channels, NECK_CH)
+        self.density_detached = False
         heads = {
             "heatmap": Head(NECK_CH, NUM_CLASSES, HEATMAP_BIAS),
             "log_r": Head(NECK_CH, 1, LOG_R_BIAS),
             "offset": Head(NECK_CH, 2, 0.0),
         }
         if mcfg.get("heads", {}).get("density", True):
-            heads["density"] = Head(NECK_CH, NUM_CLASSES, DENSITY_BIAS)
+            branch = mcfg.get("density_branch", "shared")
+            if branch not in DENSITY_BRANCHES:
+                raise ValueError(f"model.density_branch must be one of {DENSITY_BRANCHES}, got {branch!r}")
+            self.density_detached = branch == "detached"
+            heads["density"] = (DeepDensityHead if self.density_detached else Head)(NECK_CH, NUM_CLASSES, DENSITY_BIAS)
         self.heads = nn.ModuleDict(heads)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -52,5 +58,5 @@ class DCCellNet(nn.Module):
         }
         if "density" in self.heads:
             # softplus, not ReLU: a ReLU density head lets the count loss drive WBC/PLT channels dead (R17)
-            out["density"] = F.softplus(self.heads["density"](f).float())
+            out["density"] = F.softplus(self.heads["density"](f.detach() if self.density_detached else f).float())
         return out

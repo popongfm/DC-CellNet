@@ -19,6 +19,23 @@ class Head(nn.Module):
         return self.out(self.act(self.conv(x)))
 
 
+class DeepDensityHead(nn.Module):
+    """Detached-branch density head: (conv3x3+BN+ReLU) x 2 -> conv1x1. Final conv init as ``Head``."""
+
+    def __init__(self, in_ch: int, out_ch: int, bias_init: float = 0.0, mid_ch: int = 128) -> None:
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(in_ch, mid_ch, 3, padding=1), nn.BatchNorm2d(mid_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(mid_ch, mid_ch, 3, padding=1), nn.BatchNorm2d(mid_ch), nn.ReLU(inplace=True),
+        )
+        self.out = nn.Conv2d(mid_ch, out_ch, 1)
+        nn.init.normal_(self.out.weight, std=0.01)
+        nn.init.constant_(self.out.bias, bias_init)
+
+    def forward(self, x):
+        return self.out(self.body(x))
+
+
 HEATMAP_BIAS = -2.19
 LOG_R_BIAS = math.log(16.0)
 # softplus(-7) ~ 9.1e-4 per cell (~23 per 160x160 map): low start that RBC can reach quickly, never a dead unit (R17, R18)

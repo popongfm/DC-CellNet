@@ -114,3 +114,32 @@ evaluates test at the swept `best_thr`; progress goes to the console and `runs\m
   `select_from_epoch`.
 - `scripts/run_m2.sh` is the bash twin (used for CPU smoke tests). Optional env knobs, off by default: `M2_SEEDS`,
   `M2_CONFIGS`, `M2_DEVICE`, `M2_TRAIN_ARGS`, `M2_PREDICT_ARGS`, `M2_DATA_ROOT`, `M2_RUNS_DIR`, `M2_CONFIG_DIR`, `M2_PYTHON`.
+
+## M2b — detached density branch (run on Windows)
+M2 showed `L_cc` helps (dccell beat the density-only arm on every seed) but the shared density head cost the detector
+mAP50-95 (0.790 -> 0.743), so dccell could not beat plain CircleNet. M2b sets `model.density_branch: detached`
+(base default `shared`, so M2 stays reproducible): the density head reads `f.detach()` (no gradient into backbone/neck)
+and is deeper (conv3x3+BN+ReLU x2, conv1x1; final conv init as before, bias -7). `L_cc` still trains the heatmap head.
+Arms: `configs/exp_m2_b_circlenet.yaml`, `exp_m2_b_density.yaml`, `exp_m2_b_dccell.yaml` (120 epochs max, patience 20).
+Run folders are `runs\exp_m2_b_<arm>_s<seed>\`; the arm names are `b_circlenet`, `b_density`, `b_dccell`.
+
+Smoke test first (writes to `runs_smoke_b\`):
+
+    set M2_CONFIGS=b_circlenet b_density b_dccell
+    set M2_SEEDS=0
+    set M2_TRAIN_ARGS=--epochs-max 1
+    set M2_RUNS_DIR=runs_smoke_b
+    scripts\run_m2.bat
+
+Then the real run (keep `M2_CONFIGS`, clear the other knobs):
+
+    set M2_SEEDS=
+    set M2_TRAIN_ARGS=
+    set M2_RUNS_DIR=
+    scripts\run_m2.bat
+
+Compare:
+
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2b_go_no_go.md --baseline b_circlenet --candidate b_dccell --ablation b_density
+
+Duration: 9 runs x at most 120 epochs, about 10.5 h at most on the 5060 Ti.

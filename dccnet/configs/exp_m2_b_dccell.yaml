@@ -1,0 +1,15 @@
+# M2b arm: dccell (120-epoch budget, detached density branch)
+_base_: base.yaml
+model:
+  pretrained: true
+  density_branch: detached
+  heads:
+    density: true
+loss:
+  cc:
+    enabled: true
+train:
+  epochs_max: 120
+  patience: 20
+data:
+  split: splits/synthetic.json  # relative to --data-root

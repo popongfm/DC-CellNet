@@ -282,3 +282,10 @@ def test_report_states_bootstrap_n(world):
     _fill(world, cand_drops_middle=False, seeds=(0,))
     res = compare_runs.compare(world["runs"], "exp_m2_", world["split"], world["data_root"], n_boot=50)
     assert "n=50, seed 0" in compare_runs.render(res)[0]
+
+
+def test_discover_parses_underscore_arm_names(world):
+    for name in ("exp_m2_b_dccell_s0", "exp_m2_b_circlenet_s12", "exp_m2_b_dccell_s0_aborted_5"):
+        (world["runs"] / name).mkdir(parents=True)
+    found = compare_runs.discover_runs(world["runs"], "exp_m2_")
+    assert {a: sorted(v) for a, v in found.items()} == {"b_dccell": [0], "b_circlenet": [12]}

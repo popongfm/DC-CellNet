@@ -122,3 +122,91 @@ def test_imagenet_normalization_applied_in_forward():
     with torch.no_grad():
         m(x)
     assert torch.allclose(seen["x"], (x - mean) / std, atol=1e-6)
+
+
+# ---- M2b: detached density branch ----
+
+def _detached_cfg(branch="detached"):
+    cfg = _cfg()
+    cfg["model"]["density_branch"] = branch
+    return cfg
+
+
+def _backbone_neck_params(m):
+    return [p for n, mod in (("backbone", m.backbone), ("neck", m.neck)) for p in mod.parameters()]
+
+
+def _density_only_backward(m):
+    m.train()
+    out = m(torch.randn(2, 3, 128, 128))
+    out["density"].sum().backward()
+
+
+def _is_zero_or_none(p):
+    return p.grad is None or bool((p.grad == 0).all())
+
+
+def test_detached_density_does_not_reach_backbone_or_neck():
+    torch.manual_seed(0)
+    m = DCCellNet(_detached_cfg("detached"))
+    _density_only_backward(m)
+    assert all(_is_zero_or_none(p) for p in _backbone_neck_params(m))
+    dens = list(m.heads["density"].parameters())
+    assert dens and all(p.grad is not None and p.grad.abs().sum() > 0 for p in dens)
+
+
+def test_shared_density_reaches_neck():
+    torch.manual_seed(0)
+    m = DCCellNet(_detached_cfg("shared"))
+    _density_only_backward(m)
+    assert any(not _is_zero_or_none(p) for p in m.neck.parameters())
+
+
+def test_default_density_branch_is_shared():
+    torch.manual_seed(0)
+    m = DCCellNet(_cfg())
+    _density_only_backward(m)
+    assert any(not _is_zero_or_none(p) for p in m.neck.parameters())
+    assert type(m.heads["density"]).__name__ == "Head"
+
+
+def test_detached_density_head_structure_and_init():
+    torch.manual_seed(0)
+    m = DCCellNet(_detached_cfg("detached")).eval()
+    d = m.heads["density"]
+    assert d.out.bias.allclose(torch.tensor(-7.0))
+    assert d.out.weight.std().item() == pytest.approx(0.01, rel=0.2)
+    assert d.out.kernel_size == (1, 1) and d.out.out_channels == 3
+    convs = [mod for mod in d.modules() if isinstance(mod, torch.nn.Conv2d)]
+    assert [(c.kernel_size, c.in_channels, c.out_channels) for c in convs] == [
+        ((3, 3), 128, 128), ((3, 3), 128, 128), ((1, 1), 128, 3)]
+    assert sum(isinstance(mod, torch.nn.BatchNorm2d) for mod in d.modules()) == 2
+    with torch.no_grad():
+        out = m(torch.randn(2, 3, 128, 128))
+    assert out["density"].shape == (2, 3, 32, 32)
+    assert torch.isfinite(out["density"]).all() and out["density"].min() >= 0
+    assert out["density"].dtype == torch.float32
+
+
+def test_invalid_density_branch_raises():
+    with pytest.raises(ValueError, match="density_branch"):
+        DCCellNet(_detached_cfg("bogus"))
+
+
+def test_density_branch_ignored_without_density_head():
+    cfg = _detached_cfg("bogus")
+    cfg["model"]["heads"]["density"] = False
+    m = DCCellNet(cfg)
+    assert "density" not in m.heads
+
+
+def test_cc_loss_reaches_heatmap_head_in_detached_mode():
+    from dccnet.losses import count_consistency_loss
+
+    torch.manual_seed(0)
+    m = DCCellNet(_detached_cfg("detached")).train()
+    out = m(torch.randn(2, 3, 128, 128))
+    loss = count_consistency_loss(out["heatmap"], out["density"], window=8, stop_grad_density=True, peak_thr=1e-3)
+    loss.backward()
+    hm = list(m.heads["heatmap"].parameters())
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in hm)
