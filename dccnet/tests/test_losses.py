@@ -555,3 +555,128 @@ def test_base_yaml_cc_count_keys():
 
     cc = load_config(Path(__file__).resolve().parents[1] / "configs" / "base.yaml")["loss"]["cc"]
     assert (cc["count_fn"], cc["count_center"], cc["count_temp"]) == ("sigmoid", 0.3, 0.05)
+
+
+# ---------------------------------------------------------------- M2c: oracle L_cc target
+from dccnet.losses import oracle_tile_counts  # noqa: E402
+
+
+def _oracle_targets():
+    """B=2, C=2, 10x10 map (W=10). Cells given as (iy, ix, cls, mask); window 4 -> 3x3 tiles."""
+    cells = [
+        [(1, 1, 0, True), (2, 3, 0, True), (9, 9, 1, True), (5, 9, 1, True), (0, 0, 0, False)],
+        [(8, 8, 0, True), (8, 9, 0, True), (4, 4, 1, True), (4, 4, 1, False), (0, 5, 1, False)],
+    ]
+    ind = torch.tensor([[iy * 10 + ix for iy, ix, _, _ in b] for b in cells])
+    cls = torch.tensor([[c for _, _, c, _ in b] for b in cells])
+    mask = torch.tensor([[m for _, _, _, m in b] for b in cells])
+    return {"ind": ind, "cls": cls, "mask": mask}
+
+
+def test_oracle_tile_counts_local_hand_count():
+    t = _oracle_targets()
+    got = oracle_tile_counts(t, num_classes=2, H=10, W=10, window=4, scope="local")
+    assert got.shape == (2, 2, 3, 3) and got.dtype == torch.float32
+    exp = torch.zeros(2, 2, 3, 3)
+    exp[0, 0, 0, 0] = 2  # (1,1) and (2,3) share tile (0,0); masked (0,0) ignored
+    exp[0, 1, 2, 2] = 1  # (9,9): partial remainder tile
+    exp[0, 1, 1, 2] = 1  # (5,9)
+    exp[1, 0, 2, 2] = 2  # (8,8), (8,9)
+    exp[1, 1, 1, 1] = 1  # (4,4); duplicate masked-out slot ignored
+    assert torch.equal(got, exp)
+
+
+def test_oracle_tile_counts_global_hand_count():
+    t = _oracle_targets()
+    got = oracle_tile_counts(t, num_classes=2, H=10, W=10, window=4, scope="global")
+    assert got.shape == (2, 2, 1, 1)
+    assert got.view(2, 2).tolist() == [[2.0, 2.0], [2.0, 1.0]]
+
+
+def test_oracle_tile_counts_matches_density_tiling():
+    # unit-mass dirac density at the GT cells, tiled by count_consistency_loss's own tiling
+    t = _oracle_targets()
+    for scope in ("local", "global"):
+        cnt = oracle_tile_counts(t, 2, 10, 10, 4, scope)
+        dens = torch.zeros(2, 2, 10, 10)
+        for b in range(2):
+            for k in range(t["ind"].shape[1]):
+                if t["mask"][b, k]:
+                    i = int(t["ind"][b, k])
+                    dens[b, int(t["cls"][b, k]), i // 10, i % 10] += 1
+        hm = torch.zeros(2, 2, 10, 10)
+        a = count_consistency_loss(hm, dens, window=4, scope=scope)
+        b_ = count_consistency_loss(hm, window=4, scope=scope, target_counts=cnt)
+        assert a.item() == pytest.approx(b_.item(), rel=1e-7)
+
+
+def test_cc_requires_exactly_one_target():
+    z = torch.zeros(1, 1, 8, 8)
+    with pytest.raises(ValueError):
+        count_consistency_loss(z)
+    with pytest.raises(ValueError):
+        count_consistency_loss(z, z, window=4, target_counts=torch.zeros(1, 1, 2, 2))
+
+
+def _oracle_cfg(target="oracle"):
+    cfg = _cfg(False, True)
+    cfg["loss"]["cc"]["target"] = target
+    return cfg
+
+
+def test_compute_losses_oracle_without_density():
+    t = _batched_targets(SETS)
+    out = _fake_outputs(False)
+    L = compute_losses(out, t, _oracle_cfg(), epoch=20)
+    assert set(L) == KEYS
+    assert L["loss_d"].item() == 0.0
+    assert L["loss_cc"].item() > 0 and L["lambda_cc"].item() == pytest.approx(0.5)
+    assert L["loss_cc_bg"].item() >= 0
+    # backward through L_cc alone: only the heatmap gets gradient
+    L["loss_cc"].backward()
+    assert out["heatmap"].grad is not None and torch.any(out["heatmap"].grad != 0)
+    for k in ("log_r", "offset"):
+        assert out[k].grad is None
+
+
+def test_compute_losses_oracle_perfect_peaks_near_zero():
+    t = _batched_targets(SETS)
+    hm = torch.full((2, 3, 16, 16), EPS)
+    for b in range(2):
+        for k in range(t["ind"].shape[1]):
+            if t["mask"][b, k]:
+                i = int(t["ind"][b, k])
+                hm[b, int(t["cls"][b, k]), i // 16, i % 16] = 0.95
+    out = _fake_outputs(False)
+    out["heatmap"] = hm
+    L = compute_losses(out, t, _oracle_cfg(), epoch=20)
+    assert L["loss_cc"].item() == pytest.approx(0.0, abs=1e-5)
+
+
+def test_compute_losses_invalid_cc_target_raises():
+    t = _batched_targets(SETS)
+    with pytest.raises(ValueError):
+        compute_losses(_fake_outputs(False), t, _oracle_cfg("nope"), epoch=20)
+
+
+def test_compute_losses_density_target_without_density_stays_zero():
+    t = _batched_targets(SETS)
+    L = compute_losses(_fake_outputs(False), t, _oracle_cfg("density"), epoch=20)
+    assert L["loss_cc"].item() == 0.0 and L["lambda_cc"].item() == 0.0
+
+
+def test_base_and_oracle_yaml():
+    from pathlib import Path
+
+    from dccnet.config import load_config
+
+    d = Path(__file__).resolve().parents[1] / "configs"
+    assert load_config(d / "base.yaml")["loss"]["cc"]["target"] == "density"
+    o = load_config(d / "exp_m2_b_oracle.yaml")
+    c = load_config(d / "exp_m2_b_circlenet.yaml")
+    assert o["loss"]["cc"]["target"] == "oracle" and o["loss"]["cc"]["enabled"] is True
+    assert o["model"]["heads"]["density"] is False
+    assert (o["train"]["epochs_max"], o["train"]["patience"]) == (120, 20)
+    assert o["data"]["split"] == "splits/synthetic.json"
+    o["loss"]["cc"].update(c["loss"]["cc"])
+    assert o == c  # differs from b_circlenet only in the cc keys

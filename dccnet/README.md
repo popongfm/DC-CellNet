@@ -143,3 +143,31 @@ Compare:
     python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2b_go_no_go.md --baseline b_circlenet --candidate b_dccell --ablation b_density
 
 Duration: 9 runs x at most 120 epochs, about 10.5 h at most on the 5060 Ti.
+
+## M2c — oracle L_cc test (run on Windows)
+M2b (density head detached) showed no benefit from `L_cc`. This is the decisive test of the idea with a perfect target:
+`loss.cc.target: oracle` (base default `density`) computes `N_den` from the ground-truth per-tile center counts
+(`oracle_tile_counts`, same tiling as `L_cc`) instead of the density head, so the `b_oracle` arm
+(`configs/exp_m2_b_oracle.yaml`) has no density head and is architecturally identical to `b_circlenet` plus `L_cc`.
+If even this cannot beat `b_circlenet`, the `L_cc` idea is dead. Run folders: `runs\exp_m2_b_oracle_s<seed>\`.
+
+Smoke test first (writes to `runs_smoke_c\`):
+
+    set M2_CONFIGS=b_oracle
+    set M2_SEEDS=0
+    set M2_TRAIN_ARGS=--epochs-max 1
+    set M2_RUNS_DIR=runs_smoke_c
+    scripts\run_m2.bat
+
+Then the real run (keep `M2_CONFIGS=b_oracle`, clear the other knobs):
+
+    set M2_SEEDS=
+    set M2_TRAIN_ARGS=
+    set M2_RUNS_DIR=
+    scripts\run_m2.bat
+
+Compare:
+
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2c_oracle.md --baseline b_circlenet --candidate b_oracle --ablation b_circlenet
+
+Duration: 3 runs x at most 120 epochs, about 3-3.5 h on the 5060 Ti; the `b_circlenet` runs from M2b are reused.

@@ -1,0 +1,15 @@
+# M2c arm: oracle L_cc (GT per-tile counts as target, no density head); = b_circlenet + L_cc
+_base_: base.yaml
+model:
+  pretrained: true
+  heads:
+    density: false
+loss:
+  cc:
+    enabled: true
+    target: oracle
+train:
+  epochs_max: 120
+  patience: 20
+data:
+  split: splits/synthetic.json  # relative to --data-root
