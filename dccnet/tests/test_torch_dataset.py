@@ -242,3 +242,16 @@ def test_warped_disc_centroid_matches_circle(tmp_path, monkeypatch):
     mx = (w * (xs + 0.5)).sum() / w.sum()
     my = (w * (ys + 0.5)).sum() / w.sum()
     assert abs(mx - circle[0]) < 0.25 and abs(my - circle[1]) < 0.25
+
+
+def test_heatmap_sigma_and_stride_reach_targets(tmp_path):
+    # two same-class cells 12 px apart in a 640x640 image (no letterbox scaling)
+    s = _sample(tmp_path, w=640, h=640, boxes=((176, 76, 224, 124), (188, 76, 236, 124)), labels=(0, 0))
+    _, t_rad, _ = CellDataset([s])[0]
+    _, t_ada, _ = CellDataset([s], heatmap_sigma="adaptive")[0]
+    _, t_s2, _ = CellDataset([s], stride=2, heatmap_sigma="adaptive")[0]
+    assert t_rad["heatmap"][0, 25, 49].item() == pytest.approx(np.exp(-1 / (2 * 2.0**2)), rel=1e-5)
+    assert t_ada["heatmap"][0, 25, 49].item() == pytest.approx(np.exp(-1 / (2 * 0.75**2)), rel=1e-5)
+    assert t_s2["heatmap"].shape == (3, 320, 320)
+    with pytest.raises(ValueError, match="heatmap_sigma"):
+        CellDataset([s], heatmap_sigma="bogus")

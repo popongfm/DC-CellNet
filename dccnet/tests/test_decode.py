@@ -122,3 +122,20 @@ def test_nms_is_class_wise():
     log_r = torch.full((1, 1, 16, 16), float(np.log(40.0)))
     offset = torch.zeros(1, 2, 16, 16)
     assert len(decode(hm, log_r, offset, nms="circle")[0]) == 2
+
+
+def test_round_trip_stride_2():
+    rng = np.random.default_rng(1)
+    circles = sample_circles(30, rng, stride=2)
+    labels = rng.integers(0, 3, 30)
+    t = build_targets(circles, labels, np.ones(30, bool), stride=2)
+    assert t["heatmap"].shape == (3, 320, 320)
+    log_r, offset = dense_maps(t, stride=2)
+    d = decode(t["heatmap"][None], log_r, offset, score_thr=0.3, stride=2)[0]
+    assert d.shape == (30, 5)
+    for (cx, cy, r), c in zip(circles, labels):
+        sel = d[d[:, 0] == c]
+        dist = np.hypot(sel[:, 1] - cx, sel[:, 2] - cy)
+        j = int(np.argmin(dist))
+        assert dist[j] < 0.5
+        assert abs(sel[j, 3] - r) / r < 0.05

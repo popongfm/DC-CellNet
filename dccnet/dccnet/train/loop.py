@@ -48,6 +48,7 @@ from dccnet.eval.counting import count_errors
 from dccnet.eval.export_json import image_key
 from dccnet.losses import compute_losses
 from dccnet.models import DCCellNet
+from dccnet.models.model import resolve_out_stride
 from dccnet.types import Sample
 
 log = logging.getLogger(__name__)
@@ -94,8 +95,16 @@ def _use_amp(cfg: dict, device: torch.device) -> bool:
     return device.type == "cuda" and bool(cfg["train"].get("amp", False))
 
 
+def _dataset(samples: list[Sample], cfg: dict, aug: dict | None) -> CellDataset:
+    """``CellDataset`` at ``data.stride`` (checked against ``model.out_stride``) with ``data.heatmap_sigma``."""
+    resolve_out_stride(cfg)
+    d = cfg["data"]
+    return CellDataset(samples, img_size=int(d["img_size"]), aug=aug, stride=int(d["stride"]),
+                       heatmap_sigma=d.get("heatmap_sigma", "radius"))
+
+
 def _eval_loader(samples: list[Sample], cfg: dict, batch: int, num_workers: int, pin: bool) -> DataLoader:
-    ds = CellDataset(samples, img_size=int(cfg["data"]["img_size"]), aug=None, stride=int(cfg["data"]["stride"]))
+    ds = _dataset(samples, cfg, None)
     return DataLoader(ds, batch_size=int(batch), shuffle=False, num_workers=int(num_workers),
                       collate_fn=collate_fn, pin_memory=pin, persistent_workers=False)
 
@@ -105,14 +114,14 @@ def build_loaders(cfg: dict, data_root: Path, num_workers: int = 0,
     """(train_loader, val_loader) from ``data_root / cfg["data"]["split"]`` keys "train" / "val".
 
     Train: ``CellDataset(aug=cfg["aug"])``, shuffled (seeded by ``train.seed``); val: ``aug=None``.
+    Both use ``data.stride`` / ``data.heatmap_sigma``; ``data.stride != model.out_stride`` -> ValueError.
     ``persistent_workers=False`` so ``train_loader.dataset.set_epoch`` reaches fresh workers each epoch.
     """
     data_root = Path(data_root)
     split = read_split(data_root / cfg["data"]["split"], data_root)
     pin = device is not None and device.type == "cuda"
     batch = int(cfg["train"]["batch"])
-    train_ds = CellDataset(split["train"], img_size=int(cfg["data"]["img_size"]), aug=cfg.get("aug"),
-                           stride=int(cfg["data"]["stride"]))
+    train_ds = _dataset(split["train"], cfg, cfg.get("aug"))
     gen = torch.Generator()
     gen.manual_seed(int(cfg["train"]["seed"]))
     train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True, num_workers=int(num_workers),

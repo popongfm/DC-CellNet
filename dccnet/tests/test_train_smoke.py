@@ -327,3 +327,55 @@ def test_early_stopping_ignores_epochs_before_start():
     assert es.step(0.1, epoch=3) is True and es.best_epoch == 3
     assert es.step(0.05, epoch=4) is False and not es.should_stop
     assert es.step(0.05, epoch=5) is False and es.should_stop
+
+
+# ---- M2d: stride-2 output / adaptive heatmap sigma ----
+
+def _tiny_data(tmp_path, n=2, seed=4):
+    data_root = tmp_path / "data"
+    samples = make_synthetic(data_root / "img", n, seed=seed, img_size=256)
+    write_split({"train": samples[: n - 1], "val": samples[n - 1:]}, data_root / "splits" / "syn.json", data_root)
+    return data_root
+
+
+def test_fit_stride2_one_epoch(tmp_path):
+    from dccnet.train.loop import build_loaders, fit
+
+    data_root = _tiny_data(tmp_path)
+    cfg = load_config(_smoke_config(tmp_path, cc_enabled=False))
+    cfg["model"]["heads"]["density"] = False
+    cfg["model"]["out_stride"] = 2
+    cfg["data"]["stride"] = 2
+    cfg["train"]["epochs_max"] = 1
+    tl, _ = build_loaders(cfg, data_root)
+    _, targets, _ = next(iter(tl))
+    assert targets["heatmap"].shape[-2:] == (128, 128)
+    fit(cfg, tmp_path / "run", torch.device("cpu"), data_root, num_workers=0)
+    row = json.loads((tmp_path / "run" / "metrics.jsonl").read_text().strip())
+    for k in LOSS_KEYS:
+        assert math.isfinite(row[k]), k
+    assert row["val_mAP50_95"] is not None
+
+
+def test_build_loaders_stride_mismatch_raises(tmp_path):
+    from dccnet.train.loop import build_loaders
+
+    data_root = _tiny_data(tmp_path)
+    cfg = load_config(_smoke_config(tmp_path, cc_enabled=False))
+    cfg["model"]["out_stride"] = 2  # data.stride stays 4
+    with pytest.raises(ValueError, match="stride"):
+        build_loaders(cfg, data_root)
+
+
+def test_build_loaders_passes_heatmap_sigma(tmp_path):
+    from dccnet.train.loop import build_loaders
+
+    data_root = _tiny_data(tmp_path)
+    cfg = load_config(_smoke_config(tmp_path, cc_enabled=False))
+    assert cfg["data"]["heatmap_sigma"] == "radius"
+    cfg["data"]["heatmap_sigma"] = "adaptive"
+    tl, vl = build_loaders(cfg, data_root)
+    assert tl.dataset.heatmap_sigma == "adaptive" and vl.dataset.heatmap_sigma == "adaptive"
+    cfg["data"]["heatmap_sigma"] = "bogus"
+    with pytest.raises(ValueError, match="heatmap_sigma"):
+        build_loaders(cfg, data_root)

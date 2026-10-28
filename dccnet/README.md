@@ -171,3 +171,41 @@ Compare:
     python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2c_oracle.md --baseline b_circlenet --candidate b_oracle --ablation b_circlenet
 
 Duration: 3 runs x at most 120 epochs, about 3-3.5 h on the 5060 Ti; the `b_circlenet` runs from M2b are reused.
+
+## M2d — merged-peak fixes (run on Windows)
+M2/M2b/M2c traced the remaining counting errors on the synthetic overlap set to clumps of same-class cells whose
+predicted heatmap collapses into a single peak. M2d tests two fixes, each against `b_circlenet` (M2b runs reused):
+
+* `d_sigma` (`configs/exp_m2_d_sigma.yaml`): `data.heatmap_sigma: adaptive` (base default `radius`, unchanged).
+  Each cell's heatmap Gaussian is shrunk by the distance `d_nn` (input px) to the nearest other center of the SAME
+  class: `sigma_h = max(min(r / (3*stride), d_nn / (4*stride)), 0.5)` cells. Density targets are unchanged.
+* `d_s2` (`configs/exp_m2_d_s2.yaml`): `model.out_stride: 2` + `data.stride: 2` (base default 4, unchanged). The
+  stride-4 neck output is upsampled x2 (bilinear) and refined by conv3x3+BN+ReLU; all heads run on the 320x320 map
+  (640 px input). `data.stride` must equal `model.out_stride` (ValueError otherwise). Train batch stays 8: estimated
+  ~4.5 GiB of activations at batch 8 with AMP (vs ~3.4 GiB at stride 4). If the smoke test runs out of GPU memory,
+  set `train: batch: 4` in `exp_m2_d_s2.yaml` and say so in the report.
+
+Both arms differ from `exp_m2_b_circlenet.yaml` only in those keys. Run folders: `runs\exp_m2_d_sigma_s<seed>\`,
+`runs\exp_m2_d_s2_s<seed>\`.
+
+Smoke test first (writes to `runs_smoke_d\`; the `d_s2` epoch is also the 8 GB memory check):
+
+    set M2_CONFIGS=d_sigma d_s2
+    set M2_SEEDS=0
+    set M2_TRAIN_ARGS=--epochs-max 1
+    set M2_RUNS_DIR=runs_smoke_d
+    scripts\run_m2.bat
+
+Then the real run (keep `M2_CONFIGS=d_sigma d_s2`, clear the other knobs):
+
+    set M2_SEEDS=
+    set M2_TRAIN_ARGS=
+    set M2_RUNS_DIR=
+    scripts\run_m2.bat
+
+Compare (one report per fix):
+
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2d_sigma.md --baseline b_circlenet --candidate d_sigma --ablation b_circlenet
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2d_s2.md --baseline b_circlenet --candidate d_s2 --ablation b_circlenet
+
+Duration: 6 runs x at most 120 epochs, about 8-9 h on the 5060 Ti (the stride-2 runs are a little slower per epoch).

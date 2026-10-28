@@ -2,15 +2,20 @@
 
 Binding conventions (decoding, losses and the dataset rely on these):
 
-* Map size ``H = W = img_size // stride`` (160 for 640 / 4). A circle center
+* Map size ``H = W = img_size // stride`` (160 for 640 / 4, 320 for 640 / 2). A circle center
   (cx, cy) in input px maps to feature coords ``u = cx / stride``,
   ``v = cy / stride``. Center cell: ``ix = clip(floor(u), 0, W-1)``,
   ``iy = clip(floor(v), 0, H-1)``; ``offset = (u - ix, v - iy)``;
   ``ind = iy * W + ix``.
 * Heatmap: unnormalized Gaussian ``exp(-((x-ix)^2 + (y-iy)^2) / (2 sigma_h^2))``
   evaluated at integer cell coords, peak exactly 1.0 at (iy, ix),
-  ``sigma_h = max(r / (3 * stride), 0.5)`` cells, truncated to radius
-  ``ceil(3 * sigma_h)``; objects combine by element-wise max per class.
+  ``sigma_h = max(r / (3 * stride), 0.5)`` cells (``heatmap_sigma="radius"``, default),
+  truncated to radius ``ceil(3 * sigma_h)``; objects combine by element-wise max per class.
+  ``heatmap_sigma="adaptive"`` (M2d) shrinks sigma_h by the nearest SAME-class neighbour:
+  ``d_nn`` = Euclidean distance (input px) from the cell's center to the nearest other center of
+  the same class in the image (inf if none), ``sigma_h = max(min(r / (3 * stride),
+  d_nn / (4 * stride)), 0.5)`` cells. Only the heatmap changes; the density sigma below does not.
+  Any other ``heatmap_sigma`` raises ValueError.
 * Density: Gaussian centered at the sub-pixel location (u, v) evaluated at cell
   centers (x + 0.5, y + 0.5), ``sigma_d = max(r / (3 * stride), 0.5)`` cells
   (sigma = r/3 input px, floored at half a cell), truncated to radius
@@ -29,6 +34,28 @@ import math
 import numpy as np
 import torch
 
+HEATMAP_SIGMAS = ("radius", "adaptive")
+
+
+def check_heatmap_sigma(heatmap_sigma: str) -> str:
+    if heatmap_sigma not in HEATMAP_SIGMAS:
+        raise ValueError(f"heatmap_sigma must be one of {HEATMAP_SIGMAS}, got {heatmap_sigma!r}")
+    return heatmap_sigma
+
+
+def _nearest_same_class_dist(circles: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """(n,) distance (input px) from each center to the nearest other center of the same class; inf if none."""
+    d_nn = np.full(len(circles), np.inf)
+    for c in np.unique(labels):
+        idx = np.flatnonzero(labels == c)
+        if len(idx) < 2:
+            continue
+        p = circles[idx, :2]
+        d = np.sqrt(((p[:, None, :] - p[None, :, :]) ** 2).sum(-1))
+        np.fill_diagonal(d, np.inf)
+        d_nn[idx] = d.min(axis=1)
+    return d_nn
+
 
 def build_targets(
     circles: np.ndarray,
@@ -38,7 +65,9 @@ def build_targets(
     stride: int = 4,
     num_classes: int = 3,
     max_objs: int = 512,
+    heatmap_sigma: str = "radius",
 ) -> dict[str, torch.Tensor]:
+    check_heatmap_sigma(heatmap_sigma)
     circles = np.asarray(circles, dtype=np.float64).reshape(-1, 3)
     labels = np.asarray(labels).reshape(-1).astype(np.int64)
     radius_valid = np.asarray(radius_valid).reshape(-1).astype(bool)
@@ -62,6 +91,7 @@ def build_targets(
     r_valid = np.zeros(max_objs, dtype=bool)
     cls = np.zeros(max_objs, dtype=np.int64)
     circle = np.zeros((max_objs, 3), dtype=np.float32)
+    d_nn = _nearest_same_class_dist(circles, labels) if heatmap_sigma == "adaptive" else None
 
     for k in range(n):
         cx, cy, r = circles[k]
@@ -70,14 +100,15 @@ def build_targets(
         ix = int(min(max(math.floor(u), 0), W - 1))
         iy = int(min(max(math.floor(v), 0), H - 1))
         sigma = max(r / (3.0 * stride), 0.5)
+        sigma_h = sigma if d_nn is None else max(min(r / (3.0 * stride), d_nn[k] / (4.0 * stride)), 0.5)
 
         # heatmap: integer cell coords, centered on the center cell
-        rad = math.ceil(3.0 * sigma)
+        rad = math.ceil(3.0 * sigma_h)
         y0, y1 = max(iy - rad, 0), min(iy + rad + 1, H)
         x0, x1 = max(ix - rad, 0), min(ix + rad + 1, W)
         ys = np.arange(y0, y1, dtype=np.float64)[:, None]
         xs = np.arange(x0, x1, dtype=np.float64)[None, :]
-        g = np.exp(-((xs - ix) ** 2 + (ys - iy) ** 2) / (2.0 * sigma**2))
+        g = np.exp(-((xs - ix) ** 2 + (ys - iy) ** 2) / (2.0 * sigma_h**2))
         patch = heat[c, y0:y1, x0:x1]
         np.maximum(patch, g.astype(np.float32), out=patch)
 

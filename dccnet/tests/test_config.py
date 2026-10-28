@@ -54,3 +54,39 @@ def test_sample_dataclass(tmp_path):
     s = Sample(tmp_path / "a.png", "txl", 640, 480,
                np.zeros((0, 4), np.float32), np.zeros((0,), np.int64))
     assert s.boxes.shape == (0, 4) and s.labels.dtype == np.int64
+
+
+def test_base_defaults_for_m2d_knobs():
+    from pathlib import Path
+    cfg = load_config(Path(__file__).resolve().parents[1] / "configs" / "base.yaml")
+    assert cfg["data"]["heatmap_sigma"] == "radius"
+    assert cfg["model"]["out_stride"] == 4 == cfg["data"]["stride"]
+
+
+def _flat(d, prefix=()):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.update(_flat(v, (*prefix, k)))
+        else:
+            out[(*prefix, k)] = v
+    return out
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("exp_m2_d_sigma.yaml", {("data", "heatmap_sigma"): "adaptive"}),
+    ("exp_m2_d_s2.yaml", {("model", "out_stride"): 2, ("data", "stride"): 2}),
+])
+def test_m2d_configs_differ_from_b_circlenet_only_in_their_keys(name, expected):
+    from pathlib import Path
+    d = Path(__file__).resolve().parents[1] / "configs"
+    base = _flat(load_config(d / "exp_m2_b_circlenet.yaml"))
+    cand = _flat(load_config(d / name))
+    assert set(base) == set(cand)
+    diff = {k: cand[k] for k in cand if cand[k] != base[k]}
+    # stride-2 arm may also lower train.batch for VRAM (see README M2d)
+    diff.pop(("train", "batch"), None)
+    assert diff == expected
+    assert cand[("data", "split")] == "splits/synthetic.json" and cand[("model", "pretrained")] is True
+    assert cand[("model", "heads", "density")] is False and cand[("loss", "cc", "enabled")] is False
+    assert (cand[("train", "epochs_max")], cand[("train", "patience")]) == (120, 20)

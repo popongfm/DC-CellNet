@@ -210,3 +210,58 @@ def test_cc_loss_reaches_heatmap_head_in_detached_mode():
     loss.backward()
     hm = list(m.heads["heatmap"].parameters())
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in hm)
+
+
+# ---- M2d: stride-2 output ----
+
+def _s2_cfg():
+    cfg = _cfg(out_stride=2)
+    cfg["data"]["stride"] = 2
+    return cfg
+
+
+def test_stride2_output_shapes_640():
+    torch.manual_seed(0)
+    m = DCCellNet(_s2_cfg()).eval()
+    with torch.no_grad():
+        out = m(torch.randn(1, 3, 640, 640))
+    assert out["heatmap"].shape == (1, 3, 320, 320)
+    assert out["log_r"].shape == (1, 1, 320, 320)
+    assert out["offset"].shape == (1, 2, 320, 320)
+    assert out["density"].shape == (1, 3, 320, 320)
+    assert out["heatmap"].min() >= 1e-4 and out["heatmap"].max() <= 1 - 1e-4
+
+
+def test_stride2_upsample_block_structure_and_grads():
+    torch.manual_seed(0)
+    m = DCCellNet(_s2_cfg()).train()
+    convs = [mod for mod in m.neck.up.modules() if isinstance(mod, torch.nn.Conv2d)]
+    assert [(c.kernel_size, c.in_channels, c.out_channels) for c in convs] == [((3, 3), 128, 128)]
+    assert sum(isinstance(mod, torch.nn.BatchNorm2d) for mod in m.neck.up.modules()) == 1
+    out = m(torch.randn(2, 3, 128, 128))
+    assert out["heatmap"].shape == (2, 3, 64, 64)
+    sum(v.sum() for v in out.values()).backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in m.parameters())
+
+
+def test_stride4_default_state_dict_unchanged():
+    keys = set(DCCellNet(_cfg()).state_dict())
+    assert not any(k.startswith("neck.up") for k in keys)
+    assert keys == set(DCCellNet(_cfg(out_stride=4)).state_dict())
+
+
+def test_invalid_out_stride():
+    cfg = _cfg(out_stride=8)
+    cfg["data"]["stride"] = 8
+    with pytest.raises(ValueError, match="out_stride"):
+        DCCellNet(cfg)
+
+
+def test_stride_mismatch_raises_at_model_construction():
+    cfg = _cfg(out_stride=2)  # data.stride stays 4
+    with pytest.raises(ValueError, match="stride"):
+        DCCellNet(cfg)
+    cfg = _cfg()
+    cfg["data"]["stride"] = 2  # model.out_stride defaults to 4
+    with pytest.raises(ValueError, match="stride"):
+        DCCellNet(cfg)
