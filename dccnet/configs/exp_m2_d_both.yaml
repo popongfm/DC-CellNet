@@ -1,0 +1,17 @@
+# M2d arm: b_circlenet + adaptive heatmap sigma + stride-2 output (both merged-peak fixes combined)
+_base_: base.yaml
+model:
+  pretrained: true
+  out_stride: 2
+  heads:
+    density: false
+loss:
+  cc:
+    enabled: false
+train:
+  epochs_max: 120
+  patience: 20
+data:
+  split: splits/synthetic.json  # relative to --data-root
+  stride: 2
+  heatmap_sigma: adaptive

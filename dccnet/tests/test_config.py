@@ -76,6 +76,7 @@ def _flat(d, prefix=()):
 @pytest.mark.parametrize("name, expected", [
     ("exp_m2_d_sigma.yaml", {("data", "heatmap_sigma"): "adaptive"}),
     ("exp_m2_d_s2.yaml", {("model", "out_stride"): 2, ("data", "stride"): 2}),
+    ("exp_m2_d_both.yaml", {("model", "out_stride"): 2, ("data", "stride"): 2, ("data", "heatmap_sigma"): "adaptive"}),
 ])
 def test_m2d_configs_differ_from_b_circlenet_only_in_their_keys(name, expected):
     from pathlib import Path
