@@ -18,7 +18,7 @@
 | Novelty check adaptive σ | ✅ | ไม่พบงานที่ทำตรงกัน; ใกล้สุด LDC-Net, TopoCount, MCNN/CSRNet, repel coding → ต้อง ablation |
 | Phase 3 spec | ✅ อนุมัติแล้ว | `docs/specs/2026-10-30-phase3-design.md` |
 | P3a plan | ✅ | `docs/plans/2026-10-30-phase3-p3a.md` |
-| **P3a Task A1 (target variants + configs)** | 🔧 **กำลังทำ ณ ตอนเขียน** | ดูข้อ 3 |
+| P3a Task A1 (target variants + configs) | ✅ commit 50843ea, review ผ่าน (branch `claude/funny-bell-91wy2w`) | รอ Mickie smoke + real run (README "P3a") |
 | P3b plan (TXL-PBC LOSO 75 runs) | ⏳ ยังไม่เขียน | |
 | P3c (BCCD relabel 204 ภาพ) | ⏳ ยังไม่เริ่ม | audit แล้ว: label RBC ขาดทุกภาพ (12/12) |
 
