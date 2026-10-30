@@ -91,3 +91,33 @@ def test_m2d_configs_differ_from_b_circlenet_only_in_their_keys(name, expected):
     assert cand[("data", "split")] == "splits/synthetic.json" and cand[("model", "pretrained")] is True
     assert cand[("model", "heads", "density")] is False and cand[("loss", "cc", "enabled")] is False
     assert (cand[("train", "epochs_max")], cand[("train", "patience")]) == (120, 20)
+
+
+def test_base_defaults_for_p3a_knobs():
+    from pathlib import Path
+    cfg = load_config(Path(__file__).resolve().parents[1] / "configs" / "base.yaml")
+    assert cfg["data"]["heatmap_divisor"] == 4
+    assert cfg["data"]["heatmap_shape"] == "gaussian"
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("exp_m2_p3a_agnostic.yaml", {("data", "heatmap_sigma"): "adaptive_agnostic"}),
+    ("exp_m2_p3a_knn3.yaml", {("data", "heatmap_sigma"): "knn3"}),
+    ("exp_m2_p3a_mcnn.yaml", {("data", "heatmap_sigma"): "mcnn"}),
+    ("exp_m2_p3a_repel.yaml", {("data", "heatmap_sigma"): "radius", ("data", "heatmap_shape"): "repel"}),
+    ("exp_m2_p3a_div2.yaml", {("data", "heatmap_divisor"): 2}),
+    ("exp_m2_p3a_div8.yaml", {("data", "heatmap_divisor"): 8}),
+])
+def test_p3a_configs_differ_from_d_both_only_in_their_keys(name, expected):
+    from pathlib import Path
+    d = Path(__file__).resolve().parents[1] / "configs"
+    raw = yaml.safe_load((d / name).read_text())
+    assert raw["_base_"] == "base.yaml"
+    base = _flat(load_config(d / "exp_m2_d_both.yaml"))
+    cand = _flat(load_config(d / name))
+    assert set(base) == set(cand)
+    assert {k: cand[k] for k in cand if cand[k] != base[k]} == expected
+    assert cand[("data", "split")] == "splits/synthetic.json" and cand[("model", "pretrained")] is True
+    assert cand[("model", "out_stride")] == 2 == cand[("data", "stride")]
+    assert cand[("model", "heads", "density")] is False and cand[("loss", "cc", "enabled")] is False
+    assert (cand[("train", "epochs_max")], cand[("train", "patience")]) == (120, 20)

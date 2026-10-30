@@ -209,3 +209,53 @@ Compare (one report per fix):
     python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2d_s2.md --baseline b_circlenet --candidate d_s2 --ablation b_circlenet
 
 Duration: 6 runs x at most 120 epochs, about 8-9 h on the 5060 Ti (the stride-2 runs are a little slower per epoch).
+
+## P3a — target ablation (run on Windows)
+Which part of the adaptive-sigma heatmap target in `d_both` matters, and how does it compare with prior-art target
+rules? Six arms, each differs from `configs/exp_m2_d_both.yaml` only in the heatmap-target keys (base defaults
+`data.heatmap_sigma: radius`, `data.heatmap_divisor: 4`, `data.heatmap_shape: gaussian` keep every older config
+bit-identical). Sigma in cells, `s` = stride, `r` = cell radius (px), all floored at 0.5; density targets unchanged.
+
+| arm | config keys | heatmap target |
+|---|---|---|
+| `p3a_agnostic` | `heatmap_sigma: adaptive_agnostic` | `min(r/(3s), d_nn/(4s))`, `d_nn` over ALL classes |
+| `p3a_knn3` | `heatmap_sigma: knn3` | `min(r/(3s), mean 3-NN same-class dist/(4s))` |
+| `p3a_mcnn` | `heatmap_sigma: mcnn` | MCNN/CSRNet `0.3 * mean 3-NN same-class dist / s`, no cap (`r/(3s)` if no neighbour) |
+| `p3a_repel` | `heatmap_sigma: radius`, `heatmap_shape: repel` | repel code `1/(1 + 0.8 * d1 (1 + d1/d2)^2)` within `r/s` cells of each center |
+| `p3a_div2` | `heatmap_divisor: 2` | adaptive, `min(r/(3s), d_nn/(2s))` |
+| `p3a_div8` | `heatmap_divisor: 8` | adaptive, `min(r/(3s), d_nn/(8s))` |
+
+Run folders: `runs\exp_m2_p3a_<arm>_s<seed>\`. The `d_both` runs (seeds 0, 1, 2) are reused as the reference.
+
+Smoke test first (writes to `runs_smoke_p3a\`):
+
+    set M2_CONFIGS=p3a_agnostic p3a_knn3 p3a_mcnn p3a_repel p3a_div2 p3a_div8
+    set M2_SEEDS=0
+    set M2_TRAIN_ARGS=--epochs-max 1
+    set M2_RUNS_DIR=runs_smoke_p3a
+    scripts\run_m2.bat
+
+Then the real run, in two parts. First the four rule arms with all 3 seeds:
+
+    set M2_CONFIGS=p3a_agnostic p3a_knn3 p3a_mcnn p3a_repel
+    set M2_SEEDS=
+    set M2_TRAIN_ARGS=
+    set M2_RUNS_DIR=
+    scripts\run_m2.bat
+
+Then the two divisor arms with seed 0 only:
+
+    set M2_CONFIGS=p3a_div2 p3a_div8
+    set M2_SEEDS=0
+    scripts\run_m2.bat
+
+Compare (one report per arm; `d_both` is the candidate, the arm is the baseline and the ablation):
+
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_agnostic.md --baseline p3a_agnostic --candidate d_both --ablation p3a_agnostic --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_knn3.md --baseline p3a_knn3 --candidate d_both --ablation p3a_knn3 --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_mcnn.md --baseline p3a_mcnn --candidate d_both --ablation p3a_mcnn --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_repel.md --baseline p3a_repel --candidate d_both --ablation p3a_repel --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_div2.md --baseline p3a_div2 --candidate d_both --ablation p3a_div2 --seeds 0
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_div8.md --baseline p3a_div8 --candidate d_both --ablation p3a_div8 --seeds 0
+
+Duration: 14 stride-2 runs (12 + 2) x at most 120 epochs, about 24-28 h on the 5060 Ti.

@@ -379,3 +379,24 @@ def test_build_loaders_passes_heatmap_sigma(tmp_path):
     cfg["data"]["heatmap_sigma"] = "bogus"
     with pytest.raises(ValueError, match="heatmap_sigma"):
         build_loaders(cfg, data_root)
+
+
+def test_build_loaders_passes_heatmap_divisor_and_shape(tmp_path):
+    from dccnet.train.loop import build_loaders
+
+    data_root = _tiny_data(tmp_path)
+    cfg = load_config(_smoke_config(tmp_path, cc_enabled=False))
+    assert (cfg["data"]["heatmap_divisor"], cfg["data"]["heatmap_shape"]) == (4, "gaussian")
+    tl, vl = build_loaders(cfg, data_root)
+    assert tl.dataset.heatmap_divisor == 4.0 and tl.dataset.heatmap_shape == "gaussian"
+    cfg["data"]["heatmap_divisor"] = 8
+    cfg["data"]["heatmap_shape"] = "repel"
+    tl, vl = build_loaders(cfg, data_root)
+    for ds in (tl.dataset, vl.dataset):
+        assert ds.heatmap_divisor == 8.0 and ds.heatmap_shape == "repel"
+    del cfg["data"]["heatmap_divisor"], cfg["data"]["heatmap_shape"]  # older configs: defaults
+    tl, _ = build_loaders(cfg, data_root)
+    assert tl.dataset.heatmap_divisor == 4.0 and tl.dataset.heatmap_shape == "gaussian"
+    cfg["data"]["heatmap_shape"] = "bogus"
+    with pytest.raises(ValueError, match="heatmap_shape"):
+        build_loaders(cfg, data_root)

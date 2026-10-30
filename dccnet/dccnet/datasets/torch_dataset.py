@@ -15,8 +15,10 @@ Conventions (binding for training and evaluation):
   call ``set_epoch(epoch)`` each epoch so augmentation differs across epochs (default epoch 0).
 * Cells with ``r' < 0.5`` px (after letterbox / augmentation) are dropped, so zero-area boxes never
   reach ``build_targets``.
-* Targets: ``build_targets(..., stride=stride, heatmap_sigma=heatmap_sigma)`` (output stride and
-  heatmap Gaussian width rule; the training loop passes ``data.stride`` / ``data.heatmap_sigma``).
+* Targets: ``build_targets(..., stride=stride, heatmap_sigma=heatmap_sigma, heatmap_divisor=heatmap_divisor,
+  heatmap_shape=heatmap_shape)`` on the post-augmentation circles (output stride, heatmap sigma rule,
+  neighbour divisor and heatmap shape; the training loop passes ``data.stride`` / ``data.heatmap_sigma`` /
+  ``data.heatmap_divisor`` / ``data.heatmap_shape``).
 * ``unletterbox`` inverts only the letterbox mapping (evaluation never augments).
 """
 from __future__ import annotations
@@ -27,7 +29,12 @@ import torch
 from torch.utils.data import Dataset
 
 from dccnet.datasets.geometry import boxes_to_circles
-from dccnet.datasets.targets import build_targets, check_heatmap_sigma
+from dccnet.datasets.targets import (
+    build_targets,
+    check_heatmap_divisor,
+    check_heatmap_shape,
+    check_heatmap_sigma,
+)
 from dccnet.types import Sample
 
 _PAD_VALUE = 114
@@ -57,12 +64,14 @@ def _hsv_jitter(img_bgr: np.ndarray, rng, h: float = 0.015, s: float = 0.4, v: f
 
 class CellDataset(Dataset):
     def __init__(self, samples: list[Sample], img_size: int = 640, aug: dict | None = None, stride: int = 4,
-                 heatmap_sigma: str = "radius"):
+                 heatmap_sigma: str = "radius", heatmap_divisor: float = 4.0, heatmap_shape: str = "gaussian"):
         self.samples = list(samples)
         self.img_size = int(img_size)
         self.aug = aug
         self.stride = int(stride)
         self.heatmap_sigma = check_heatmap_sigma(heatmap_sigma)
+        self.heatmap_divisor = check_heatmap_divisor(heatmap_divisor)
+        self.heatmap_shape = check_heatmap_shape(heatmap_shape)
         self.epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -107,7 +116,8 @@ class CellDataset(Dataset):
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         image = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1)).astype(np.float32) / 255.0)
         targets = build_targets(c, labels, valid, img_size=S, stride=self.stride,
-                                heatmap_sigma=self.heatmap_sigma)
+                                heatmap_sigma=self.heatmap_sigma, heatmap_divisor=self.heatmap_divisor,
+                                heatmap_shape=self.heatmap_shape)
         meta = {
             "scale": float(s),
             "pad": (int(pad_x), int(pad_y)),

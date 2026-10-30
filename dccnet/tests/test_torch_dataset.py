@@ -255,3 +255,43 @@ def test_heatmap_sigma_and_stride_reach_targets(tmp_path):
     assert t_s2["heatmap"].shape == (3, 320, 320)
     with pytest.raises(ValueError, match="heatmap_sigma"):
         CellDataset([s], heatmap_sigma="bogus")
+
+
+def test_heatmap_divisor_and_shape_reach_targets(tmp_path):
+    from dccnet.datasets.targets import build_targets
+
+    s = _sample(tmp_path, w=640, h=640, boxes=((176, 76, 224, 124), (188, 76, 236, 124)), labels=(0, 0))
+    for kw in ({"heatmap_sigma": "adaptive", "heatmap_divisor": 8.0}, {"heatmap_shape": "repel"},
+               {"heatmap_sigma": "knn3"}, {"heatmap_sigma": "mcnn"}, {"heatmap_sigma": "adaptive_agnostic"}):
+        ds = CellDataset([s], stride=2, **kw)
+        _, t, _ = ds[0]
+        c, l = _active_circles(t)
+        ref = build_targets(c, l, t["r_valid"].numpy()[t["mask"].numpy()], stride=2, **kw)
+        assert torch.equal(t["heatmap"], ref["heatmap"]), kw
+    ds = CellDataset([s], heatmap_divisor=2, heatmap_shape="repel")
+    assert ds.heatmap_divisor == 2.0 and ds.heatmap_shape == "repel"
+    with pytest.raises(ValueError, match="heatmap_shape"):
+        CellDataset([s], heatmap_shape="bogus")
+    with pytest.raises(ValueError, match="heatmap_divisor"):
+        CellDataset([s], heatmap_divisor=0)
+
+
+@pytest.mark.parametrize("kw", [{"heatmap_sigma": "mcnn"}, {"heatmap_sigma": "knn3"},
+                                {"heatmap_sigma": "adaptive"}, {"heatmap_sigma": "adaptive_agnostic"},
+                                {"heatmap_shape": "repel"}])
+def test_neighbour_stats_use_post_augmentation_cells(tmp_path, monkeypatch, kw):
+    from dccnet.datasets.targets import build_targets
+
+    # translate +0.5*S (FakeRng): A (cx 310 -> 630) survives, its 16 px neighbour C (cx 326 -> 646) is dropped
+    s = _sample(tmp_path, w=640, h=640, boxes=((290, 80, 330, 120), (306, 80, 346, 120)), labels=(0, 0))
+    ds = CellDataset([s], aug={**NO_AUG, "translate": 0.5}, stride=2, **kw)
+    monkeypatch.setattr(CellDataset, "_make_rng", lambda self, index: FakeRng())
+    _, t, _ = ds[0]
+    c, l = _active_circles(t)
+    assert len(c) == 1 and c[0, 0] == pytest.approx(630.0)
+    kept = build_targets(c, l, np.ones(1, bool), stride=2, **kw)["heatmap"]
+    assert torch.equal(t["heatmap"], kept)
+    # had the dropped cell still counted as a neighbour, A's target would differ
+    with_c = build_targets(np.concatenate([c, [[646.0, c[0, 1], c[0, 2]]]]), np.zeros(2, np.int64),
+                           np.ones(2, bool), stride=2, **kw)["heatmap"]
+    assert not torch.equal(with_c, kept)
