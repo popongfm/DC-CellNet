@@ -96,11 +96,14 @@ def _use_amp(cfg: dict, device: torch.device) -> bool:
 
 
 def _dataset(samples: list[Sample], cfg: dict, aug: dict | None) -> CellDataset:
-    """``CellDataset`` at ``data.stride`` (checked against ``model.out_stride``) with ``data.heatmap_sigma``."""
+    """``CellDataset`` at ``data.stride`` (checked against ``model.out_stride``) with ``data.heatmap_sigma`` /
+    ``data.heatmap_divisor`` (default 4) / ``data.heatmap_shape`` (default gaussian)."""
     resolve_out_stride(cfg)
     d = cfg["data"]
     return CellDataset(samples, img_size=int(d["img_size"]), aug=aug, stride=int(d["stride"]),
-                       heatmap_sigma=d.get("heatmap_sigma", "radius"))
+                       heatmap_sigma=d.get("heatmap_sigma", "radius"),
+                       heatmap_divisor=d.get("heatmap_divisor", 4.0),
+                       heatmap_shape=d.get("heatmap_shape", "gaussian"))
 
 
 def _eval_loader(samples: list[Sample], cfg: dict, batch: int, num_workers: int, pin: bool) -> DataLoader:
@@ -114,7 +117,7 @@ def build_loaders(cfg: dict, data_root: Path, num_workers: int = 0,
     """(train_loader, val_loader) from ``data_root / cfg["data"]["split"]`` keys "train" / "val".
 
     Train: ``CellDataset(aug=cfg["aug"])``, shuffled (seeded by ``train.seed``); val: ``aug=None``.
-    Both use ``data.stride`` / ``data.heatmap_sigma``; ``data.stride != model.out_stride`` -> ValueError.
+    Both use ``data.stride`` / ``data.heatmap_*``; ``data.stride != model.out_stride`` -> ValueError.
     ``persistent_workers=False`` so ``train_loader.dataset.set_epoch`` reaches fresh workers each epoch.
     """
     data_root = Path(data_root)

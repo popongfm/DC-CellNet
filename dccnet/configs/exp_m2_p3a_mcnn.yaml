@@ -1,0 +1,17 @@
+# P3a target ablation arm: MCNN-style geometry-adaptive sigma 0.3 * mean 3-NN distance (no r/(3s) cap)
+_base_: base.yaml
+model:
+  pretrained: true
+  out_stride: 2
+  heads:
+    density: false
+loss:
+  cc:
+    enabled: false
+train:
+  epochs_max: 120
+  patience: 20
+data:
+  split: splits/synthetic.json  # relative to --data-root
+  stride: 2
+  heatmap_sigma: mcnn

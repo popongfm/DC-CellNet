@@ -255,3 +255,37 @@ def test_heatmap_sigma_and_stride_reach_targets(tmp_path):
     assert t_s2["heatmap"].shape == (3, 320, 320)
     with pytest.raises(ValueError, match="heatmap_sigma"):
         CellDataset([s], heatmap_sigma="bogus")
+
+
+def test_neighbour_stats_use_post_augmentation_circles(tmp_path, monkeypatch):
+    # two same-class cells 30 px apart (r = 40); FakeRng translates by +0.5 * S, dropping the right/lower one.
+    # knn3 sigma must then be the lone-cell fallback r/(3s), not the pre-aug neighbour-shrunk value.
+    from dccnet.datasets.targets import build_targets
+
+    monkeypatch.setattr(CellDataset, "_make_rng", lambda self, index: FakeRng())
+    s = _sample(tmp_path, w=640, h=640, boxes=((260, 260, 340, 340), (290, 260, 370, 340)), labels=(0, 0))
+    aug = dict(NO_AUG, translate=0.5)
+    ds = CellDataset([s], aug=aug, heatmap_sigma="knn3")
+    _, t, _ = ds[0]
+    circ, cls = _active_circles(t)
+    assert len(circ) == 1 and circ[0, 0] == pytest.approx(620.0)
+    lone = build_targets(circ, cls, np.ones(1, bool), heatmap_sigma="knn3")
+    assert torch.equal(t["heatmap"], lone["heatmap"])
+    both = build_targets(np.array([[620.0, 620.0, 40.0], [650.0, 620.0, 40.0]]), np.array([0, 0]),
+                         np.ones(2, bool), heatmap_sigma="knn3")
+    assert not torch.equal(t["heatmap"], both["heatmap"])
+
+
+def test_dataset_passes_divisor_and_shape(tmp_path):
+    from dccnet.datasets.targets import build_targets
+
+    s = _sample(tmp_path, w=640, h=640, boxes=((180, 80, 220, 120), (200, 80, 240, 120)), labels=(1, 1))
+    for kw in ({"heatmap_sigma": "adaptive", "heatmap_divisor": 8.0}, {"heatmap_shape": "repel"}):
+        _, t, _ = CellDataset([s], stride=2, **kw)[0]
+        circ, cls = _active_circles(t)
+        ref = build_targets(circ, cls, np.ones(len(circ), bool), stride=2, **kw)
+        assert torch.equal(t["heatmap"], ref["heatmap"])
+    with pytest.raises(ValueError, match="heatmap_shape"):
+        CellDataset([s], heatmap_shape="disk")
+    with pytest.raises(ValueError, match="heatmap_divisor"):
+        CellDataset([s], heatmap_divisor=0)

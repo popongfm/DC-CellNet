@@ -46,5 +46,7 @@ aug:
 data:
   img_size: 640
   stride: 4  # must equal model.out_stride
-  heatmap_sigma: radius  # radius | adaptive (M2d: sigma_h shrunk by nearest same-class neighbour distance)
+  heatmap_sigma: radius  # radius | adaptive | adaptive_agnostic | knn3 | mcnn (M2d/P3a: sigma_h shrunk by nearest same-class neighbour distance)
+  heatmap_divisor: 4  # D in adaptive / adaptive_agnostic / knn3 sigma (P3a); ignored by radius / mcnn
+  heatmap_shape: gaussian  # gaussian | repel (P3a: Liang-style repel map, alpha 0.8; ignores heatmap_sigma)
   split: splits/pooled.json  # relative to --data-root

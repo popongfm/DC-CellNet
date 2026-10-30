@@ -91,3 +91,38 @@ def test_m2d_configs_differ_from_b_circlenet_only_in_their_keys(name, expected):
     assert cand[("data", "split")] == "splits/synthetic.json" and cand[("model", "pretrained")] is True
     assert cand[("model", "heads", "density")] is False and cand[("loss", "cc", "enabled")] is False
     assert (cand[("train", "epochs_max")], cand[("train", "patience")]) == (120, 20)
+
+
+P3A = {
+    "p3a_agnostic": {("data", "heatmap_sigma"): "adaptive_agnostic"},
+    "p3a_knn3": {("data", "heatmap_sigma"): "knn3"},
+    "p3a_mcnn": {("data", "heatmap_sigma"): "mcnn"},
+    "p3a_repel": {("data", "heatmap_sigma"): "radius", ("data", "heatmap_shape"): "repel"},
+    "p3a_div2": {("data", "heatmap_divisor"): 2},
+    "p3a_div8": {("data", "heatmap_divisor"): 8},
+}
+
+
+def test_base_defaults_for_p3a_knobs():
+    from pathlib import Path
+    cfg = load_config(Path(__file__).resolve().parents[1] / "configs" / "base.yaml")
+    assert cfg["data"]["heatmap_sigma"] == "radius"
+    assert cfg["data"]["heatmap_divisor"] == 4
+    assert cfg["data"]["heatmap_shape"] == "gaussian"
+
+
+@pytest.mark.parametrize("arm, expected", sorted(P3A.items()))
+def test_p3a_configs_differ_from_d_both_only_in_their_keys(arm, expected):
+    from pathlib import Path
+    d = Path(__file__).resolve().parents[1] / "configs"
+    raw = yaml.safe_load((d / f"exp_m2_{arm}.yaml").read_text(encoding="utf-8"))
+    assert raw["_base_"] == "base.yaml"
+    ref = _flat(load_config(d / "exp_m2_d_both.yaml"))
+    cand = _flat(load_config(d / f"exp_m2_{arm}.yaml"))
+    assert set(ref) == set(cand)
+    diff = {k: cand[k] for k in cand if cand[k] != ref[k]}
+    assert diff == expected
+    assert cand[("data", "split")] == "splits/synthetic.json" and cand[("model", "pretrained")] is True
+    assert cand[("model", "out_stride")] == 2 == cand[("data", "stride")]
+    assert cand[("model", "heads", "density")] is False and cand[("loss", "cc", "enabled")] is False
+    assert (cand[("train", "epochs_max")], cand[("train", "patience")]) == (120, 20)

@@ -1,0 +1,18 @@
+# P3a target ablation arm: Liang-style repel heatmap instead of a Gaussian (sigma rule unused)
+_base_: base.yaml
+model:
+  pretrained: true
+  out_stride: 2
+  heads:
+    density: false
+loss:
+  cc:
+    enabled: false
+train:
+  epochs_max: 120
+  patience: 20
+data:
+  split: splits/synthetic.json  # relative to --data-root
+  stride: 2
+  heatmap_sigma: radius
+  heatmap_shape: repel

@@ -209,3 +209,59 @@ Compare (one report per fix):
     python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/m2d_s2.md --baseline b_circlenet --candidate d_s2 --ablation b_circlenet
 
 Duration: 6 runs x at most 120 epochs, about 8-9 h on the 5060 Ti (the stride-2 runs are a little slower per epoch).
+
+## P3a — target ablation (run on Windows)
+P3a asks which part of the `d_both` heatmap target matters. Six arms, each differing from
+`configs/exp_m2_d_both.yaml` (stride 2, `heatmap_sigma: adaptive`, D = 4) only in the keys listed; the existing
+`runs\exp_m2_d_both_s<seed>\` runs are reused as the reference. New `data` keys (base defaults keep every older
+config bit-identical): `heatmap_sigma: radius | adaptive | adaptive_agnostic | knn3 | mcnn`, `heatmap_divisor: 4`,
+`heatmap_shape: gaussian | repel`. All sigma are in output cells, floored at 0.5; neighbour distances are computed
+on the cells left after augmentation.
+
+| arm | keys | heatmap target |
+|---|---|---|
+| `p3a_agnostic` | `heatmap_sigma: adaptive_agnostic` | `min(r/(3s), d_nn/(D*s))`, d_nn to the nearest center of ANY class |
+| `p3a_knn3` | `heatmap_sigma: knn3` | `min(r/(3s), m3/(D*s))`, m3 = mean distance to the <= 3 nearest same-class centers |
+| `p3a_mcnn` | `heatmap_sigma: mcnn` | MCNN-style `0.3 * m3 / s` (no cap); no same-class neighbour -> `r/(3s)` |
+| `p3a_repel` | `heatmap_sigma: radius`, `heatmap_shape: repel` | repel map (Liang et al.), alpha = 0.8 (Xie/Liang proximity-map value) |
+| `p3a_div2` | `heatmap_divisor: 2` | `adaptive` with D = 2 |
+| `p3a_div8` | `heatmap_divisor: 8` | `adaptive` with D = 8 |
+
+Repel map: inside a disk of radius r/s cells around each center cell, value `1 / (1 + 0.8 * D')` with
+`D' = d1 * (1 + d1/d2)^2`, d1 / d2 = distance (cells) to the nearest / second-nearest same-class center (d2 = inf
+for a lone cell); exactly 1.0 at each center cell, a deep valley between touching cells; per class combined by max.
+The sigma rule is not used by the repel arm. Density targets, offsets, radius and masks are the same in every arm.
+
+Smoke test first (1 epoch per arm, writes to `runs_smoke_p3a\`):
+
+    set M2_CONFIGS=p3a_agnostic p3a_knn3 p3a_mcnn p3a_repel p3a_div2 p3a_div8
+    set M2_SEEDS=0
+    set M2_TRAIN_ARGS=--epochs-max 1
+    set M2_RUNS_DIR=runs_smoke_p3a
+    scripts\run_m2.bat
+
+Then the real run in two parts (clear the smoke knobs). Part 1, the four target arms with all three seeds:
+
+    set M2_CONFIGS=p3a_agnostic p3a_knn3 p3a_mcnn p3a_repel
+    set M2_SEEDS=
+    set M2_TRAIN_ARGS=
+    set M2_RUNS_DIR=
+    scripts\run_m2.bat
+
+Part 2, the divisor sweep with seed 0 only:
+
+    set M2_CONFIGS=p3a_div2 p3a_div8
+    set M2_SEEDS=0
+    scripts\run_m2.bat
+
+Compare each arm against `d_both` (one report per arm; `--seeds 0` for the divisor arms):
+
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_agnostic.md --baseline p3a_agnostic --candidate d_both --ablation p3a_agnostic --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_knn3.md --baseline p3a_knn3 --candidate d_both --ablation p3a_knn3 --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_mcnn.md --baseline p3a_mcnn --candidate d_both --ablation p3a_mcnn --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_repel.md --baseline p3a_repel --candidate d_both --ablation p3a_repel --seeds 0,1,2
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_div2.md --baseline p3a_div2 --candidate d_both --ablation p3a_div2 --seeds 0
+    python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_div8.md --baseline p3a_div8 --candidate d_both --ablation p3a_div8 --seeds 0
+
+Duration: 14 runs x at most 120 epochs at stride 2, about 24-28 h on the 5060 Ti (the repel arm builds its
+targets a little more slowly on the CPU side).
