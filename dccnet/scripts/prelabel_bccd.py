@@ -77,17 +77,19 @@ def main(argv=None) -> int:
             np.array([r["score"] for r in recs], dtype=np.float64), conf=a.conf)
         lines = to_yolo_lines(boxes, labels, s.width, s.height)
         txt = "".join(ln + "\n" for ln in lines)
-        (out / "labels" / f"{stem}.txt").write_text(txt)
+        (out / "labels" / f"{stem}.txt").write_text(txt, encoding="utf-8", newline="\n")
         shutil.copyfile(s.image_path, out / "images" / Path(s.image_path).name)
-        manifest[stem] = {"hash": label_hash(txt), "image": key, "origin": [int(o) for o in origin]}
+        added = [[float(v) for v in b] + [int(c)] for b, c, o in zip(boxes, labels, origin) if o == 1]
+        manifest[stem] = {"hash": label_hash(txt), "image": key, "origin": [int(o) for o in origin],
+                          "added_boxes": added}
         rows.append((stem, st))
         for k in tot:
             tot[k] += st[k]
-    (out / "classes.txt").write_text("".join(c + "\n" for c in CLASS_NAMES))
-    (out / "prelabel_manifest.json").write_text(json.dumps(manifest, indent=1))
-    (out / "README.txt").write_text(README)
+    (out / "classes.txt").write_text("".join(c + "\n" for c in CLASS_NAMES), encoding="utf-8", newline="\n")
+    (out / "prelabel_manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8", newline="\n")
+    (out / "README.txt").write_text(README, encoding="utf-8", newline="\n")
     rows.sort(key=lambda r: (-r[1]["n_added"], r[0]))
-    with open(out / "review_list.csv", "w", newline="") as f:
+    with open(out / "review_list.csv", "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["image", "n_gt", "n_dupes_removed", "n_added", "n_final", "done"])
         for stem, st in rows:

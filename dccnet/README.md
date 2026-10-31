@@ -316,3 +316,11 @@ Send the results back (Git Bash or WSL, from `dccnet`):
 YOLO runs have no `metrics.jsonl` (they write `results.csv`) and DC-CellNet/FRCNN runs have no `results.csv`; `--ignore-failed-read` turns those missing-file errors into warnings, and `--exclude` keeps renamed `*_aborted_*` run dirs out of the archive.
 
 ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26m roughly 1-1.5 h, Faster R-CNN roughly 2-3 h; stage 1 is about 25-35 h, stage 2 about 4x that. The estimate is rough; the smoke run's per-epoch times give the real figure.
+
+## P3c — BCCD overlap relabel
+
+1. Predict on the 204-image overlap set with the pooled YOLO26m weights: `python scripts\baselines\yolo_predict.py --split splits/overlap_bccd.json --subset test --conf 0.001 ...` (writes `preds_bccd.json`).
+2. `python scripts\prelabel_bccd.py --data-root data --preds <run>\preds_bccd.json` (merges GT with predictions of score >= 0.5; exports `data\bccd_relabel\`; refuses to overwrite existing `labels\` without `--force`).
+3. X-AnyLabeling: open `data\bccd_relabel\images`, import the YOLO labels with `classes.txt`, work through `review_list.csv` top-down, and save as YOLO. Rule: label every RBC whose visible outline is more than half the cell, including cells cut by the image border.
+4. Any time: `python scripts\import_bccd_relabel.py --data-root data --progress` prints `<changed>/<total> label files edited since pre-label`.
+5. When done: `python scripts\import_bccd_relabel.py --data-root data` writes `data\splits\bccd_overlap_v2.json` (same image keys and order as `overlap_bccd.json`) and `data\bccd_relabel\import_stats.json`. Any missing or malformed label file is listed and nothing is written.

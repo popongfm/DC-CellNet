@@ -125,3 +125,125 @@ def test_prelabel_cli_writes_export(tmp_path):
     assert (out / "labels" / "BloodImage_00000.txt").read_text() == "edited\n"
     assert _run(root, tmp_path, "--force").returncode == 0
     assert (out / "labels" / "BloodImage_00000.txt").read_text() != "edited\n"
+
+
+# ---- C2: compare_label_sets, strict parsing, import / progress ----
+from dccnet.datasets.relabel import compare_label_sets  # noqa: E402
+
+IMPORT = Path(__file__).resolve().parents[1] / "scripts" / "import_bccd_relabel.py"
+
+
+def test_compare_label_sets_counts():
+    old = _a([[0, 0, 10, 10], [20, 20, 30, 30], [50, 50, 60, 60]])
+    new = _a([[0, 0, 10, 11], [20, 20, 30, 30], [100, 100, 110, 110]])
+    r = compare_label_sets(old, _a([0, 0, 0], np.int64), new, _a([0, 1, 0], np.int64))
+    assert r == {"kept": 1, "added": 2, "removed": 2}  # box 2 changed class
+    assert compare_label_sets(np.zeros((0, 4)), [], np.zeros((0, 4)), []) == {"kept": 0, "added": 0, "removed": 0}
+
+
+@pytest.mark.parametrize("line", ["0 nan 0.5 0.1 0.1", "0 0.5 inf 0.1 0.1", "0 0.5 0.5 0 0.1", "0 0.5 0.5 0.1 -0.1",
+                                  "0 1.2 0.5 0.1 0.1", "0 0.5 0.5 1.5 0.1", "0 -0.1 0.5 0.1 0.1"])
+def test_from_yolo_lines_rejects_non_finite_degenerate_out_of_range(line):
+    with pytest.raises(ValueError, match="bad YOLO line"):
+        from_yolo_lines([line], 640, 480)
+
+
+def test_from_yolo_lines_allows_blank_trailing_ws_and_tolerance():
+    b, l = from_yolo_lines(["", "  ", "0 0.5 0.5 0.1 0.1   ", "1 0.5 0.5 1.0000005 0.1"], 640, 480)
+    assert l.tolist() == [0, 1]
+
+
+def _prelabel(root, tmp_path):
+    r = _run(root, tmp_path)
+    assert r.returncode == 0, r.stderr
+    return root / "bccd_relabel"
+
+
+def _import(root, *extra):
+    return subprocess.run([sys.executable, str(IMPORT), "--data-root", str(root), *extra],
+                          capture_output=True, text=True)
+
+
+def test_import_roundtrip_keys_and_order(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    r = _import(root)
+    assert r.returncode == 0, r.stderr
+    v1 = json.loads((root / "splits" / "overlap_bccd.json").read_text())["test"]
+    v2 = json.loads((root / "splits" / "bccd_overlap_v2.json").read_text())["test"]
+    assert [x["image"] for x in v2] == [x["image"] for x in v1]
+    for a, b in zip(v1, v2):
+        assert list(a) == list(b)
+        assert all(a[k] == b[k] for k in ("image", "source", "width", "height"))
+    assert [len(x["boxes"]) for x in v2] == [2, 4]
+    assert np.abs(np.array(v2[0]["boxes"][0]) - np.array([10, 10, 50, 50])).max() < 0.01
+    assert [x["labels"] for x in v2] == [[0, 0], [0, 0, 0, 0]]
+    st = json.loads((out / "import_stats.json").read_text())
+    assert st["totals"]["n_images"] == 2 and st["totals"]["n_boxes"] == 6
+    pi = st["per_image"]["BloodImage_00001"]
+    assert pi["vs_original"] == {"kept": 2, "added": 2, "removed": 0}
+    assert pi["yolo_origin_kept"] == 2
+    assert st["per_image"]["BloodImage_00000"]["yolo_origin_kept"] == 1
+
+
+def test_import_old_manifest_without_added_boxes_gives_null(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    man = json.loads((out / "prelabel_manifest.json").read_text())
+    for m in man.values():
+        del m["added_boxes"]
+    (out / "prelabel_manifest.json").write_text(json.dumps(man))
+    r = _import(root)
+    assert r.returncode == 0 and "warning" in r.stderr.lower()
+    st = json.loads((out / "import_stats.json").read_text())
+    assert all(v["yolo_origin_kept"] is None for v in st["per_image"].values())
+
+
+def test_import_reports_all_errors_and_writes_nothing(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    (out / "labels" / "BloodImage_00000.txt").unlink()
+    (out / "labels" / "BloodImage_00001.txt").write_text("7 0.5 0.5 0.1 0.1\n")
+    r = _import(root)
+    assert r.returncode != 0
+    assert "BloodImage_00000" in r.stderr and "BloodImage_00001" in r.stderr
+    assert not (root / "splits" / "bccd_overlap_v2.json").exists()
+    assert not (out / "import_stats.json").exists()
+
+
+def test_import_empty_label_file_is_zero_boxes(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    (out / "labels" / "BloodImage_00000.txt").write_text("")
+    assert _import(root).returncode == 0
+    v2 = json.loads((root / "splits" / "bccd_overlap_v2.json").read_text())["test"]
+    assert v2[0]["boxes"] == [] and v2[0]["labels"] == []
+
+
+def test_progress_counts_edited_files_and_ignores_crlf(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    r = _import(root, "--progress")
+    assert r.returncode == 0 and "0/2 label files edited since pre-label" in r.stdout
+    p0 = out / "labels" / "BloodImage_00000.txt"
+    p0.write_bytes(p0.read_bytes().replace(b"\n", b"\r\n"))  # CRLF only: not an edit
+    r = _import(root, "--progress")
+    assert "0/2 label files edited" in r.stdout
+    p1 = out / "labels" / "BloodImage_00001.txt"
+    p1.write_text("0 0.5 0.5 0.1 0.1\n", newline="\n")
+    r = _import(root, "--progress")
+    assert r.returncode == 0 and "1/2 label files edited" in r.stdout
+    assert not (root / "splits" / "bccd_overlap_v2.json").exists()
+    assert not (out / "import_stats.json").exists()
+
+
+def test_prelabel_writes_lf_bytes_and_added_boxes(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    raw = (out / "labels" / "BloodImage_00001.txt").read_bytes()
+    assert b"\r" not in raw
+    man = json.loads((out / "prelabel_manifest.json").read_text())
+    assert man["BloodImage_00001"]["hash"] == hashlib.sha1(raw).hexdigest()
+    ab = man["BloodImage_00001"]["added_boxes"]
+    assert len(ab) == 2 and len(ab[0]) == 5 and ab[0][4] == 0
+    assert man["BloodImage_00000"]["added_boxes"] == [[200.0, 200.0, 240.0, 240.0, 0]]

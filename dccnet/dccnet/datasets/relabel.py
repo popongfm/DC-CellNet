@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 
 import numpy as np
 
@@ -62,6 +63,8 @@ def from_yolo_lines(lines, width: int, height: int):
     boxes, labels = [], []
     for ln in lines:
         parts = ln.split()
+        if not parts:
+            continue
         try:
             if len(parts) != 5:
                 raise ValueError("expected 5 fields")
@@ -71,11 +74,49 @@ def from_yolo_lines(lines, width: int, height: int):
             if not 0 <= c < NUM_CLASSES:
                 raise ValueError(f"class {c} not in 0..{NUM_CLASSES - 1}")
             cx, cy, w, h = (float(v) for v in parts[1:])
+            if not all(math.isfinite(v) for v in (cx, cy, w, h)):
+                raise ValueError("non-finite value")
+            if w <= 0 or h <= 0:
+                raise ValueError("w and h must be > 0")
+            if any(v < -1e-6 or v > 1 + 1e-6 for v in (cx, cy, w, h)):
+                raise ValueError("cx/cy/w/h must be within [0, 1]")
         except ValueError as e:
             raise ValueError(f"bad YOLO line {ln!r}: {e}") from None
         boxes.append([(cx - w / 2) * width, (cy - h / 2) * height, (cx + w / 2) * width, (cy + h / 2) * height])
         labels.append(c)
     return (np.asarray(boxes, dtype=np.float32).reshape(-1, 4), np.asarray(labels, dtype=np.int64))
+
+
+def normalize_label_text(text: str) -> str:
+    """Newline-normalise (CRLF / CR -> LF) and make a non-empty text end with exactly the C1 trailing newline."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def compare_label_sets(old_boxes, old_labels, new_boxes, new_labels, iou: float = 0.5) -> dict:
+    """Greedy same-class matching by IoU descending (IoU >= iou). Returns counts kept / added / removed."""
+    ob = np.asarray(old_boxes, dtype=np.float32).reshape(-1, 4)
+    ol = np.asarray(old_labels, dtype=np.int64).reshape(-1)
+    nb = np.asarray(new_boxes, dtype=np.float32).reshape(-1, 4)
+    nl = np.asarray(new_labels, dtype=np.int64).reshape(-1)
+    pairs = []
+    for i in range(len(ob)):
+        if len(nb) == 0:
+            break
+        ious = iou_xyxy(ob[i], nb)
+        for j in range(len(nb)):
+            if ol[i] == nl[j] and ious[j] >= iou:
+                pairs.append((float(ious[j]), i, j))
+    pairs.sort(key=lambda t: -t[0])
+    used_o, used_n = set(), set()
+    for _, i, j in pairs:
+        if i not in used_o and j not in used_n:
+            used_o.add(i)
+            used_n.add(j)
+    kept = len(used_o)
+    return {"kept": kept, "added": int(len(nb) - kept), "removed": int(len(ob) - kept)}
 
 
 def label_hash(text: str) -> str:
