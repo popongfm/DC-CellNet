@@ -3,7 +3,7 @@
 Usage (from dccnet/):
     python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3b.md
         [--splits pooled,loso_BCCD,loso_BCDD,loso_PBC,loso_Raabin] [--arms d_both,d_sigma,circlenet,yolo26m,frcnn]
-        [--candidate d_both] [--seeds 0,1,2] [--map-ci-n 1000] [--n-boot 1000]
+        [--candidate d_both] [--seeds 0,1,2] [--map-ci-n 1000] [--n-boot 1000] [--extra overlap_bccd,bccd_overlap_v2]
 
 Run dirs are ``<runs-dir>/<prefix>_<split>_<arm>_s<seed>`` (scripts/run_exp.*); test images come from
 ``<data-root>/splits/<split>.json``. Every run is read with ``compare_runs.load_run`` (thresholds = each run's own
@@ -21,6 +21,13 @@ Report:
      name images outside the split's test subset (the offending keys are listed);
   4. efficiency per arm: n_params, mean train_seconds per split (summary.json), FPS from ``<run>/latency.json`` if present;
   5. stage-1 line ``pooled stop/go: d_both vs circlenet = <verdict>`` (spec section 3.2), whatever ``--candidate``.
+  6. ``--extra x1,x2`` (P3c, optional) adds report section 5. For each extra split ``x`` and each training split in ``--splits``
+     that is ``pooled`` or ``loso_BCCD`` and has the files, the section-1 table from ``<run>/preds_<x>.json`` +
+     ``summary_<x>.json`` against ``<data-root>/splits/<x>.json`` (``run_exp.*`` with EXP_EXTRA_SPLITS makes them), the
+     candidate-vs-arm paired comparisons (same key check / INCONCLUSIVE rules), and a label-bias table: per arm
+     mAP50-95 and RBC MAE on ``overlap_bccd`` (v1) vs ``bccd_overlap_v2`` (v2) and v2 - v1, plus the
+     ``yolo_origin_kept`` / ``n_prelabel_added`` totals of ``<data-root>/bccd_relabel/import_stats.json``.
+     The section is absent without ``--extra``.
 The exit code is always 0.
 """
 from __future__ import annotations
@@ -50,6 +57,8 @@ FOLDS = ("loso_BCCD", "loso_BCDD", "loso_PBC", "loso_Raabin")  # fixed concatena
 SPLITS = ("pooled",) + FOLDS
 ARMS = ("d_both", "d_sigma", "circlenet", "yolo26m", "frcnn")
 STAGE1 = ("d_both", "circlenet")
+EXTRA_TRAIN_SPLITS = ("pooled", "loso_BCCD")  # training splits whose runs are evaluated on the extra splits
+V1, V2 = "overlap_bccd", "bccd_overlap_v2"  # original / relabelled BCCD overlap sets (label-bias table)
 NAN = float("nan")
 
 
@@ -92,21 +101,26 @@ def _protocol_warnings(name: str, arm: str, run_dir: Path, summary: dict) -> lis
             f"accum 1)"]
 
 
-def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, seeds, warnings: list[str]) -> dict:
+def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, seeds, warnings: list[str],
+               eval_split: str | None = None, tag: str = "test") -> dict:
     """Load every requested run of one split.
 
     Returns ``{"samples", "runs": {arm: {seed: run}}, "problems": {arm: {seed: reason}}}``; a run with a problem
     (no dir, incomplete, predictions outside the subset) is absent from ``runs``.
+
+    ``eval_split``/``tag`` (P3c): score the runs of training split ``split`` on ``splits/<eval_split>.json`` using
+    ``preds_<tag>.json`` / ``summary_<tag>.json`` (default: the split's own test subset).
     """
+    eval_split = eval_split or split
     out = {"samples": None, "runs": {}, "problems": {}}
 
     def problem(arm, seed, why):
         out["problems"].setdefault(arm, {})[seed] = why
         warnings.append(why)
 
-    split_path = Path(data_root) / "splits" / f"{split}.json"
+    split_path = Path(data_root) / "splits" / f"{eval_split}.json"
     if not split_path.exists():
-        warnings.append(f"split {split}: {split_path} not found; all its runs treated as missing")
+        warnings.append(f"split {eval_split}: {split_path} not found; all its runs treated as missing")
         for arm in arms:
             for seed in seeds:
                 out["problems"].setdefault(arm, {})[seed] = f"{_run_name(prefix, split, arm, seed)}: split missing"
@@ -123,19 +137,19 @@ def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, s
                 problem(arm, seed, f"{name}: no run dir")
                 continue
             try:
-                preds = load_records(d / "preds_test.json")
+                preds = load_records(d / f"preds_{tag}.json")
                 pred_keys = {p["image"] for p in preds}
                 extra = sorted(pred_keys - keys)
                 if extra:
-                    problem(arm, seed, f"{name}: {len(extra)} prediction image key(s) not in the {split} test subset; "
+                    problem(arm, seed, f"{name}: {len(extra)} prediction image key(s) not in the {eval_split} test subset; "
                                        f"first up to 5: {extra[:5]}")
                     continue
                 if len(keys - pred_keys):
                     warnings.append(f"{name}: {len(keys - pred_keys)} test image(s) without prediction records "
                                     f"(scored as zero detections)")
-                r = load_run(d, samples, data_root)
+                r = load_run(d, samples, data_root, tag)
                 summary = json.loads((d / "summary.json").read_text())
-                test = json.loads((d / "summary_test.json").read_text())
+                test = json.loads((d / f"summary_{tag}.json").read_text())
                 latency = _read_json(d / "latency.json")
             except (FileNotFoundError, json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
                 why = (f"missing {Path(e.filename).name}" if isinstance(e, FileNotFoundError) and e.filename
@@ -147,9 +161,10 @@ def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, s
                                    f"{r['select_from']}); run excluded")
                 continue
             if r["summary_mae"] is not None and abs(r["summary_mae"] - r["mae"]) > 1e-6:
-                warnings.append(f"{name}: recomputed RBC MAE {r['mae']:.4f} != summary_test.json "
+                warnings.append(f"{name}: recomputed RBC MAE {r['mae']:.4f} != summary_{tag}.json "
                                 f"{r['summary_mae']:.4f}")
-            warnings.extend(_protocol_warnings(name, arm, d, summary))
+            if tag == "test":
+                warnings.extend(_protocol_warnings(name, arm, d, summary))
             ce = count_errors(samples, preds, r["thr"], data_root)
             coco = test.get("coco") or {}
             r.update({"dir": d, "map50": coco.get("mAP50"), "ap_class": coco.get("per_class_50_95") or {},
@@ -160,7 +175,8 @@ def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, s
     return out
 
 
-def _table_row(runs: dict[int, dict], samples, data_root: Path, map_ci_n: int, ci_seed: int, label: str) -> dict:
+def _table_row(runs: dict[int, dict], samples, data_root: Path, map_ci_n: int, ci_seed: int, label: str,
+               tag: str = "test") -> dict:
     base = summarize_arm(runs)
     row = {"n_seeds": base["n_seeds"], "seeds": base["seeds"],
            "map_mean": _num(base["map_mean"]), "map_std": _num(base["map_std"]),
@@ -172,7 +188,7 @@ def _table_row(runs: dict[int, dict], samples, data_root: Path, map_ci_n: int, c
            "map_ci": None}
     if map_ci_n > 0 and ci_seed in runs:
         t0 = time.time()
-        ci = coco_map_ci(samples, load_records(runs[ci_seed]["dir"] / "preds_test.json"), data_root, n=map_ci_n,
+        ci = coco_map_ci(samples, load_records(runs[ci_seed]["dir"] / f"preds_{tag}.json"), data_root, n=map_ci_n,
                          seed=0)
         print(f"  mAP CI {label} seed {ci_seed}: {time.time() - t0:.0f}s", file=sys.stderr, flush=True)
         row["map_ci"] = {"seed": ci_seed, "n": map_ci_n, "mAP50_95": [_num(x) for x in ci["mAP50_95"]],
@@ -215,7 +231,7 @@ def _loso_cmp(splits_data, cand, base, n_boot, seeds) -> dict:
 
 
 def summarize(runs_dir: Path, prefix: str, data_root: Path, splits=SPLITS, arms=ARMS, candidate: str = "d_both",
-              seeds=(0, 1, 2), map_ci_n: int = 1000, n_boot: int = 1000) -> dict:
+              seeds=(0, 1, 2), map_ci_n: int = 1000, n_boot: int = 1000, extra=()) -> dict:
     seeds = sorted(int(s) for s in seeds)
     splits = list(splits)
     arms = list(arms)
@@ -282,11 +298,60 @@ def summarize(runs_dir: Path, prefix: str, data_root: Path, splits=SPLITS, arms=
                            "train_seconds": train_s,
                            "fps": float(np.mean(fps)) if fps else None}
 
-    return {"prefix": prefix, "splits": splits, "arms": arms, "candidate": candidate, "seeds": seeds,
-            "map_ci_n": map_ci_n, "n_boot": n_boot,
-            "n_test_images": {sp: (len(d["samples"]) if d["samples"] is not None else None) for sp, d in data.items()},
-            "tables": tables, "c2": c2, "comparisons": comparisons, "stage1_detail": s1, "stage1": s1["verdict"],
-            "efficiency": efficiency, "warnings": warnings}
+    res = {"prefix": prefix, "splits": splits, "arms": arms, "candidate": candidate, "seeds": seeds,
+           "map_ci_n": map_ci_n, "n_boot": n_boot,
+           "n_test_images": {sp: (len(d["samples"]) if d["samples"] is not None else None) for sp, d in data.items()},
+           "tables": tables, "c2": c2, "comparisons": comparisons, "stage1_detail": s1, "stage1": s1["verdict"],
+           "efficiency": efficiency, "warnings": warnings}
+    if extra:
+        res["extra"] = _extra(runs_dir, prefix, data_root, splits, arms, candidate, seeds, map_ci_n, n_boot,
+                              list(extra), warnings)
+    return res
+
+
+def _extra(runs_dir, prefix, data_root, splits, arms, candidate, seeds, map_ci_n, n_boot, extra, warnings) -> dict:
+    """Section 5: per extra split x training split (pooled, loso_BCCD) tables + paired comparisons + label bias."""
+    train_splits = [sp for sp in splits if sp in EXTRA_TRAIN_SPLITS]
+    load_arms = arms + ([candidate] if candidate not in arms else [])
+    ci_seed = seeds[0] if seeds else 0
+    blocks: dict = {x: {} for x in extra}
+    for x in extra:
+        for ts in train_splits:
+            found = discover_runs(runs_dir, f"{prefix}_{ts}_")
+            has_files = any((d / f"preds_{x}.json").exists() or (d / f"summary_{x}.json").exists()
+                            for per_seed in found.values() for d in per_seed.values())
+            if not has_files:
+                warnings.append(f"extra {x} / {ts}: no run has preds_{x}.json or summary_{x}.json (run run_exp.* "
+                                f"with EXP_EXTRA_SPLITS={x}); block skipped")
+                continue
+            sd = load_split(runs_dir, prefix, ts, data_root, load_arms, seeds, warnings, eval_split=x, tag=x)
+            if sd["samples"] is None:
+                continue
+            tables = {arm: _table_row(sd["runs"][arm], sd["samples"], data_root, map_ci_n, ci_seed, f"{x} {ts} {arm}", x)
+                      for arm in arms if sd["runs"].get(arm)}
+            cmps = {base: _compare(sd["runs"].get(candidate, {}), sd["runs"].get(base, {}),
+                                   _missing(sd, candidate, seeds) + _missing(sd, base, seeds), n_boot, seeds)
+                    for base in arms if base != candidate}
+            blocks[x][ts] = {"n_images": len(sd["samples"]), "tables": tables, "comparisons": cmps}
+    bias: dict = {}
+    if V1 in extra and V2 in extra:
+        for ts in train_splits:
+            if ts not in blocks[V1] or ts not in blocks[V2]:
+                continue
+            bias[ts] = {}
+            for arm in arms:
+                t1, t2 = blocks[V1][ts]["tables"].get(arm), blocks[V2][ts]["tables"].get(arm)
+                if t1 is None or t2 is None:
+                    continue
+                m1, m2 = t1["map_mean"], t2["map_mean"]
+                e1, e2 = t1["mae_class"]["RBC"]["mean"], t2["mae_class"]["RBC"]["mean"]
+                bias[ts][arm] = {"map_v1": m1, "map_v2": m2, "mae_v1": e1, "mae_v2": e2,
+                                 "map_delta": None if m1 is None or m2 is None else m2 - m1,
+                                 "mae_delta": None if e1 is None or e2 is None else e2 - e1}
+    stats = _read_json(Path(data_root) / "bccd_relabel" / "import_stats.json")
+    totals = (stats or {}).get("totals") or {}
+    return {"splits": extra, "train_splits": train_splits, "blocks": blocks, "bias": bias,
+            "import_stats": {k: totals.get(k) for k in ("yolo_origin_kept", "n_prelabel_added")} if stats else None}
 
 
 # ---------------------------------------------------------------------------------------------------- rendering
@@ -316,6 +381,28 @@ def _cmp_row(scope: str, cand: str, base: str, g: dict) -> str:
             f"({'yes' if g['ok_recall'] else 'no'}) | {per_seed} ({'yes' if g['ok_seeds'] else 'no'}) | |")
 
 
+def _arm_table(tables: dict, arms) -> list[str]:
+    """Section-1 table (header, one row per arm, trailing blank line) from ``{arm: _table_row}``."""
+    ap_h = " | ".join(f"AP50-95 {c}" for c in CLASS_NAMES)
+    mae_h = " | ".join(f"count MAE {c}" for c in CLASS_NAMES)
+    rec_h = " | ".join(f"recall bin {b}" for b in range(N_BINS))
+    ncol = 5 + 2 * len(CLASS_NAMES) + N_BINS
+    L = [f"| arm | n_seeds | mAP50-95 | mAP50-95 CI | mAP50 | {ap_h} | {mae_h} | {rec_h} |", "|" + "---|" * ncol]
+    for arm in arms:
+        t = tables.get(arm)
+        if t is None:
+            L.append(f"| {arm} | 0 |" + " |" * (ncol - 2))
+            continue
+        ci = t["map_ci"]
+        ci_s = f"[{_f(ci['mAP50_95'][0])}, {_f(ci['mAP50_95'][1])}] (s{ci['seed']})" if ci else ""
+        L.append(f"| {arm} | {t['n_seeds']} | {_pm({'mean': t['map_mean'], 'std': t['map_std']})} | {ci_s} | "
+                 f"{_pm({'mean': t['map50_mean'], 'std': t['map50_std']})} | "
+                 + " | ".join(_pm(t["ap_class"][c]) for c in CLASS_NAMES) + " | "
+                 + " | ".join(_pm(t["mae_class"][c]) for c in CLASS_NAMES) + " | "
+                 + " | ".join(_pm(x) for x in t["recall"]) + " |")
+    return L + [""]
+
+
 def render(res: dict) -> str:
     cand, seeds = res["candidate"], res["seeds"]
     L = ["# P3b: TXL-PBC pooled + leave-one-source-out summary", "",
@@ -332,26 +419,8 @@ def render(res: dict) -> str:
               f"run only, not over seeds.", ""]
     else:
         L += ["mAP bootstrap CI disabled (`--map-ci-n 0`).", ""]
-    ap_h = " | ".join(f"AP50-95 {c}" for c in CLASS_NAMES)
-    mae_h = " | ".join(f"count MAE {c}" for c in CLASS_NAMES)
-    rec_h = " | ".join(f"recall bin {b}" for b in range(N_BINS))
-    ncol = 5 + 2 * len(CLASS_NAMES) + N_BINS
     for sp in res["splits"]:
-        L += [f"### {sp}", "", f"| arm | n_seeds | mAP50-95 | mAP50-95 CI | mAP50 | {ap_h} | {mae_h} | {rec_h} |",
-              "|" + "---|" * ncol]
-        for arm in res["arms"]:
-            t = res["tables"][sp].get(arm)
-            if t is None:
-                L.append(f"| {arm} | 0 |" + " |" * (ncol - 2))
-                continue
-            ci = t["map_ci"]
-            ci_s = f"[{_f(ci['mAP50_95'][0])}, {_f(ci['mAP50_95'][1])}] (s{ci['seed']})" if ci else ""
-            L.append(f"| {arm} | {t['n_seeds']} | {_pm({'mean': t['map_mean'], 'std': t['map_std']})} | {ci_s} | "
-                     f"{_pm({'mean': t['map50_mean'], 'std': t['map50_std']})} | "
-                     + " | ".join(_pm(t["ap_class"][c]) for c in CLASS_NAMES) + " | "
-                     + " | ".join(_pm(t["mae_class"][c]) for c in CLASS_NAMES) + " | "
-                     + " | ".join(_pm(x) for x in t["recall"]) + " |")
-        L.append("")
+        L += [f"### {sp}", ""] + _arm_table(res["tables"][sp], res["arms"])
     L += ["Overlap bin = number of other GT circles a cell overlaps (0..3+); recall at IoU 0.5.", "",
           "## 2. C2: pooled vs leave-one-source-out (mAP50-95)", "",
           "LOSO mean = mean over the 4 folds of each fold's seed mean; blank when any fold misses a required seed.", "",
@@ -391,9 +460,44 @@ def render(res: dict) -> str:
         for base, g in res["comparisons"][scope].items():
             L.append(f"- {label}: {cand} vs {base} = {g['verdict']}")
     L.append("")
+    if "extra" in res:
+        L += _render_extra(res)
     if res["warnings"]:
         L += ["## Warnings", ""] + [f"- ⚠ {w}" for w in res["warnings"]] + [""]
     return "\n".join(L)
+
+
+def _render_extra(res: dict) -> list[str]:
+    ex, cand = res["extra"], res["candidate"]
+    L = ["## 5. Extra evaluation splits (BCCD overlap, original vs relabelled)", "",
+         f"Runs trained on the listed training split are scored on each extra split with their own val-swept best_thr "
+         f"(`preds_<x>.json` / `summary_<x>.json`). Extra splits: {', '.join(ex['splits'])}. Same columns as section 1; "
+         f"mAP CI as in section 1.", ""]
+    for x in ex["splits"]:
+        for ts, blk in ex["blocks"][x].items():
+            L += [f"### {x} / {ts} ({blk['n_images']} images)", ""] + _arm_table(blk["tables"], res["arms"])
+            L += ["| scope | comparison | verdict | seeds | images | RBC MAE cand vs base | diff CI (upper<0) | "
+                  "recall bins 2+3 (higher) | per-seed diff (all<0) | inconclusive because |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+            L += [_cmp_row(f"{x} / {ts}", cand, base, g) for base, g in blk["comparisons"].items()]
+            L.append("")
+    L += ["### Label bias: original (v1) vs relabelled (v2) labels", ""]
+    if not ex["bias"]:
+        L += [f"No training split has both `{V1}` and `{V2}` results.", ""]
+    for ts, arms in ex["bias"].items():
+        L += [f"Trained on {ts}; v1 = `{V1}`, v2 = `{V2}`; delta = v2 − v1.", "",
+              "| arm | mAP50-95 v1 | mAP50-95 v2 | Δ mAP50-95 | RBC MAE v1 | RBC MAE v2 | Δ RBC MAE |", "|---|---|---|---|---|---|---|"]
+        for arm, b in arms.items():
+            L.append(f"| {arm} | {_blank(b['map_v1'])} | {_blank(b['map_v2'])} | {_blank(b['map_delta'])} | "
+                     f"{_blank(b['mae_v1'])} | {_blank(b['mae_v2'])} | {_blank(b['mae_delta'])} |")
+        L.append("")
+    st = ex["import_stats"]
+    if st:
+        L += [f"Relabel import (`bccd_relabel/import_stats.json`): yolo_origin_kept = {st['yolo_origin_kept']} "
+              f"(pre-label boxes that survived Mickie's review), n_prelabel_added = {st['n_prelabel_added']}.", ""]
+    else:
+        L += ["`bccd_relabel/import_stats.json` not found: yolo_origin_kept n/a.", ""]
+    return L
 
 
 def _clean(o):
@@ -428,12 +532,13 @@ def main(argv=None) -> int:
     ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--map-ci-n", type=int, default=1000, help="image-bootstrap draws for the mAP CI; 0 disables")
     ap.add_argument("--n-boot", type=int, default=1000, help="paired-bootstrap draws for the comparisons")
+    ap.add_argument("--extra", default="", help="comma list of extra eval splits (e.g. overlap_bccd,bccd_overlap_v2)")
     args = ap.parse_args(argv)
     if not _csv(args.seeds):
         ap.error("--seeds must name at least one seed")
 
     res = summarize(args.runs_dir, args.prefix, args.data_root, _csv(args.splits), _csv(args.arms), args.candidate,
-                    [int(x) for x in _csv(args.seeds)], args.map_ci_n, args.n_boot)
+                    [int(x) for x in _csv(args.seeds)], args.map_ci_n, args.n_boot, _csv(args.extra))
     md = render(res)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(md, encoding="utf-8")

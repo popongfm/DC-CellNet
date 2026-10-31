@@ -62,12 +62,14 @@ def _ratio(v):
     return v[:, 0].sum() / v[:, 1].sum() if v[:, 1].sum() > 0 else NAN
 
 
-def load_run(run_dir: Path, samples, data_root: Path) -> dict:
-    """Read one run's artefacts and recompute the per-image statistics. Raises FileNotFoundError if incomplete."""
+def load_run(run_dir: Path, samples, data_root: Path, tag: str = "test") -> dict:
+    """Read one run's artefacts and recompute the per-image statistics. Raises FileNotFoundError if incomplete.
+
+    ``tag`` selects ``summary_<tag>.json`` / ``preds_<tag>.json`` (default the test split; P3c extra eval splits)."""
     summary = json.loads((run_dir / "summary.json").read_text())
     thr = float(json.loads((run_dir / "sweep_val.json").read_text())["best_thr"])
-    test = json.loads((run_dir / "summary_test.json").read_text())
-    preds = load_records(run_dir / "preds_test.json")
+    test = json.loads((run_dir / f"summary_{tag}.json").read_text())
+    preds = load_records(run_dir / f"preds_{tag}.json")
     err = np.asarray(count_errors(samples, preds, thr, data_root)["per_image"]["RBC"], dtype=np.float64)
     counts = overlap_counts(samples, preds, thr, data_root)  # (images, bins, [TP, FP, n_gt])
     tot = counts.sum(axis=0)

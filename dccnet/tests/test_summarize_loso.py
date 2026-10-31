@@ -361,3 +361,133 @@ def test_non_protocol_batch_accum_warns(world):
     assert len(prot) == 2
     assert any(w.startswith("p3b_pooled_d_both_s0") and "batch 4" in w for w in prot)
     assert any(w.startswith("p3b_pooled_frcnn_s0") and "accum_steps 2" in w for w in prot)
+
+
+# ---- P3c: --extra (evaluation of trained arms on the BCCD overlap sets, original v1 and relabelled v2) ----
+V1, V2 = "overlap_bccd", "bccd_overlap_v2"
+
+
+@pytest.fixture
+def xworld(world):
+    """v1 = 3 images with the 4 CELLS; v2 = the same image keys with one more RBC (an undetected 5th cell)."""
+    root = world["data_root"]
+    v1 = _samples(root, "BCCD", 3)
+    v2 = [Sample(s.image_path, s.source, s.width, s.height,
+                 np.array([*s.boxes, _box(100, 70)], dtype=np.float32), np.zeros(len(s.boxes) + 1, dtype=np.int64))
+          for s in v1]
+    for name, samples in ((V1, v1), (V2, v2)):
+        write_split({"test": samples}, root / "splits" / f"{name}.json", root)
+    world["extra"] = {V1: v1, V2: v2}
+    return world
+
+
+def _fill_extra(w, split, arms=ARMS, seeds=SEEDS):
+    """d_both detects every v1 cell (v1 RBC MAE 0, v2 1); other arms miss the middle cell (v1 1, v2 2)."""
+    root = w["data_root"]
+    for arm in arms:
+        for seed in seeds:
+            d = w["runs"] / f"p3b_{split}_{arm}_s{seed}"
+            preds = _preds(w["extra"][V1], root, drop_middle=arm != "d_both")
+            good = arm == "d_both"
+            for x, m_ap, mae in ((V1, 0.6 if good else 0.4, 0.0 if good else 1.0),
+                                 (V2, 0.5 if good else 0.35, 1.0 if good else 2.0)):
+                (d / f"preds_{x}.json").write_text(json.dumps(preds))
+                (d / f"summary_{x}.json").write_text(json.dumps({
+                    "coco": {"mAP50_95": m_ap, "mAP50": m_ap + 0.1, "per_class_50_95": {"RBC": m_ap}},
+                    "counting": {"MAE": {"RBC": mae, "WBC": 0.0, "Platelets": 0.0}}}))
+
+
+def _import_stats(w, kept=17, added=25):
+    d = w["data_root"] / "bccd_relabel"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "import_stats.json").write_text(json.dumps({"totals": {"yolo_origin_kept": kept, "n_prelabel_added": added}}))
+
+
+def test_summarize_extra_section(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled")
+    _import_stats(xworld)
+    res = _summ(xworld, splits=("pooled",), extra=(V1, V2))
+    ex = res["extra"]
+    assert ex["splits"] == [V1, V2]
+    t1 = ex["blocks"][V1]["pooled"]
+    assert t1["n_images"] == 3
+    assert t1["tables"]["d_both"]["map_mean"] == pytest.approx(0.6)
+    assert t1["tables"]["circlenet"]["mae_class"]["RBC"]["mean"] == pytest.approx(1.0)
+    assert ex["blocks"][V2]["pooled"]["tables"]["d_both"]["mae_class"]["RBC"]["mean"] == pytest.approx(1.0)
+    assert t1["comparisons"]["circlenet"]["verdict"] == "GO"
+    assert t1["comparisons"]["circlenet"]["n_images"] == 3
+    b = ex["bias"]["pooled"]
+    assert b["d_both"]["map_v1"] == pytest.approx(0.6) and b["d_both"]["map_v2"] == pytest.approx(0.5)
+    assert b["d_both"]["map_delta"] == pytest.approx(-0.1)
+    assert (b["d_both"]["mae_v1"], b["d_both"]["mae_v2"], b["d_both"]["mae_delta"]) == pytest.approx((0.0, 1.0, 1.0))
+    assert b["circlenet"]["map_delta"] == pytest.approx(-0.05) and b["circlenet"]["mae_delta"] == pytest.approx(1.0)
+    assert ex["import_stats"] == {"yolo_origin_kept": 17, "n_prelabel_added": 25}
+    md = summarize_loso.render(res)
+    assert "label bias" in md.lower() and "yolo_origin_kept" in md and "17" in md
+    assert V1 in md and V2 in md and "-0.1000" in md
+    assert not res["warnings"]
+
+
+def test_summarize_extra_absent_without_flag(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled")
+    res = _summ(xworld, splits=("pooled",))
+    assert "extra" not in res
+    assert "label bias" not in summarize_loso.render(res).lower()
+
+
+def test_summarize_extra_missing_files_warns(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled", arms=("d_both",), seeds=(0, 1))
+    res = _summ(xworld, splits=("pooled",), extra=(V1, V2))
+    assert any(f"preds_{V2}.json" in w and "p3b_pooled_circlenet_s0" in w for w in res["warnings"])
+    assert any("p3b_pooled_d_both_s2" in w and f"preds_{V1}.json" in w for w in res["warnings"])
+    blk = res["extra"]["blocks"][V1]["pooled"]
+    assert blk["tables"]["d_both"]["n_seeds"] == 2 and "circlenet" not in blk["tables"]
+    cmp_ = blk["comparisons"]["circlenet"]
+    assert cmp_["verdict"] == "INCONCLUSIVE" and cmp_["reasons"]
+    assert "INCONCLUSIVE" in summarize_loso.render(res)
+
+
+def test_summarize_extra_split_file_missing_warns(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled")
+    (xworld["data_root"] / "splits" / f"{V2}.json").unlink()
+    res = _summ(xworld, splits=("pooled",), extra=(V1, V2))
+    assert any(V2 in w and "not found" in w for w in res["warnings"])
+
+
+def test_summarize_extra_key_mismatch_inconclusive(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled")
+    d = xworld["runs"] / "p3b_pooled_circlenet_s1"
+    bad = json.loads((d / f"preds_{V1}.json").read_text())
+    bad[0]["image"] = "elsewhere/x.png"
+    (d / f"preds_{V1}.json").write_text(json.dumps(bad))
+    res = _summ(xworld, splits=("pooled",), extra=(V1, V2))
+    c = res["extra"]["blocks"][V1]["pooled"]["comparisons"]["circlenet"]
+    assert c["verdict"] == "INCONCLUSIVE" and any("elsewhere/x.png" in r for r in c["reasons"])
+
+
+def test_summarize_extra_loso_bccd(xworld):
+    _fill(xworld, splits=("pooled", "loso_BCCD"))
+    _fill_extra(xworld, "loso_BCCD")  # pooled runs have no extra files
+    res = _summ(xworld, splits=("pooled", "loso_BCCD"), extra=(V1, V2))
+    ex = res["extra"]
+    assert list(ex["blocks"][V1]) == ["loso_BCCD"] and list(ex["blocks"][V2]) == ["loso_BCCD"]
+    assert ex["bias"]["loso_BCCD"]["d_both"]["mae_delta"] == pytest.approx(1.0)
+    assert "pooled" not in ex["bias"]
+    md = summarize_loso.render(res)
+    assert f"### {V1} / loso_BCCD" in md and f"### {V1} / pooled" not in md
+    assert any("extra" in w and "pooled" in w and "block skipped" in w for w in res["warnings"])
+    assert "yolo_origin_kept" not in md or "n/a" in md  # no import_stats.json -> noted, not an error
+
+
+def test_summarize_extra_cli(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled")
+    r = _cli(xworld, ("--splits", "pooled", "--map-ci-n", "0", "--extra", f"{V1},{V2}"))
+    assert r.returncode == 0, r.stderr
+    assert "label bias" in xworld["out"].read_text().lower()
+    assert json.loads(xworld["out"].with_suffix(".json").read_text())["extra"]["splits"] == [V1, V2]

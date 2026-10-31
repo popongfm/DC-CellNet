@@ -147,3 +147,59 @@ def test_runner_fails_on_missing_split(tmp_path):
     assert r.returncode != 0
     assert _calls(tmp_path) == []
     assert "loso_BCCD.json" in (tmp_path / "runs" / "exp_runner.log").read_text()
+
+
+def _finished(tmp_path, arm="d_both", split="pooled", thr=0.25):
+    run = tmp_path / "runs" / f"p3b_{split}_{arm}_s0"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text("{}")
+    (run / "summary_test.json").write_text("{}")
+    (run / "sweep_val.json").write_text(json.dumps({"best_thr": thr}))
+    return run
+
+
+def test_runner_extra_splits(tmp_path):
+    env = _setup(tmp_path, ("pooled", "overlap_bccd", "bccd_overlap_v2"))
+    run = _finished(tmp_path)
+    yrun = _finished(tmp_path, "yolo26m")
+    extra = dict(EXP_ARMS="d_both yolo26m", EXP_SEEDS="0", EXP_EXTRA_SPLITS="overlap_bccd bccd_overlap_v2")
+    r = _run(env, **extra)
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = _calls(tmp_path)
+    data = tmp_path / "data"
+    # finished runs: no retraining and no main-split predictions, only the extra stage
+    assert not any(c.startswith(("train.py", "yolo_train.py")) for c in calls)
+    assert not any("pooled.json" in c for c in calls)
+    assert len(calls) == 8
+    for x in ("overlap_bccd", "bccd_overlap_v2"):
+        dp = [c for c in calls if c.startswith("predict.py") and f"/{x}.json" in c]
+        assert len(dp) == 1
+        assert f"--run {run}" in dp[0] and f"--split {data}/splits/{x}.json --subset test" in dp[0]
+        assert f"--out {run}/preds_{x}.json" in dp[0]
+        yp = [c for c in calls if c.startswith("yolo_predict.py") and f"/{x}.json" in c]
+        assert len(yp) == 1 and f"--weights {yrun}/weights/best.pt" in yp[0]
+        assert f"--split {data}/splits/{x}.json --subset test" in yp[0]
+        ev = [c for c in calls if c.startswith("evaluate.py") and f"--out {run}/summary_{x}.json" in c]
+        assert len(ev) == 1
+        assert f"--split {data}/splits/{x}.json --subset test --preds {run}/preds_{x}.json" in ev[0]
+        assert "--score-thr 0.25 --map-ci-n 0" in ev[0]
+        assert (run / f"summary_{x}.json").exists()
+    n = len(calls)
+    r2 = _run(env, **extra)
+    assert r2.returncode == 0 and len(_calls(tmp_path)) == n
+
+
+def test_runner_extra_after_normal_stage_and_missing_extra_split(tmp_path):
+    env = _setup(tmp_path, ("pooled", "overlap_bccd"))
+    r = _run(env, EXP_ARMS="d_both", EXP_SEEDS="0", EXP_EXTRA_SPLITS="overlap_bccd bccd_overlap_v2")
+    assert r.returncode != 0 and _calls(tmp_path) == []
+    assert "bccd_overlap_v2.json" in (tmp_path / "runs" / "exp_runner.log").read_text()
+    r = _run(env, EXP_ARMS="d_both", EXP_SEEDS="0", EXP_EXTRA_SPLITS="overlap_bccd")
+    assert r.returncode == 0, r.stdout + r.stderr
+    kinds = []
+    for c in _calls(tmp_path):
+        w = c.split()
+        kinds.append(w[0] + (":sweep" if "--sweep-thr" in w else ""))
+    assert kinds == ["train.py", "predict.py", "evaluate.py:sweep", "predict.py", "evaluate.py", "predict.py",
+                     "evaluate.py"]
+    assert "--score-thr 0.4 --map-ci-n 0" in _calls(tmp_path)[-1]

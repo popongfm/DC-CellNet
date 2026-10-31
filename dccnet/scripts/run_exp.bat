@@ -5,9 +5,11 @@ rem For each split, arm and seed: train, predict val, sweep threshold on val, pr
 rem best_thr (no mAP CI: --map-ci-n 0, computed offline in summarize_loso.py). Run dir: RUNS\PREFIX_split_arm_sSEED.
 rem Family by arm name: yolo* = Ultralytics, frcnn = Faster R-CNN, else DC-CellNet with CONFIG_DIR\PREFIX_arm.yaml.
 rem Resumable: re-run to continue. A killed run - best.pt or weights\ without summary.json - is renamed aside and retrained.
+rem Extra eval splits (EXP_EXTRA_SPLITS): after each run's normal stage, also for finished runs (predict only, no retraining),
+rem predict DATA\splits\x.json (subset test) to RUN\preds_x.json and evaluate at the run's best_thr to RUN\summary_x.json (skipped if present).
 rem Splits are never regenerated: a missing DATA\splits\split.json is a failure. Stops at the first failure.
 rem Environment variables: EXP_PYTHON EXP_DATA_ROOT EXP_RUNS_DIR EXP_CONFIG_DIR EXP_PREFIX EXP_SPLITS EXP_ARMS EXP_SEEDS
-rem EXP_DEVICE EXP_TRAIN_ARGS EXP_PREDICT_ARGS  (same meaning and defaults as in run_exp.sh).
+rem EXP_DEVICE EXP_TRAIN_ARGS EXP_PREDICT_ARGS EXP_EXTRA_SPLITS  (same meaning and defaults as in run_exp.sh).
 setlocal EnableExtensions
 cd /d "%~dp0.."
 
@@ -24,7 +26,7 @@ if defined EXP_DEVICE set "DEVARG=--device %EXP_DEVICE%"
 set "LOG=%EXP_RUNS_DIR%\exp_runner.log"
 if not exist "%EXP_RUNS_DIR%" mkdir "%EXP_RUNS_DIR%"
 
-for %%P in (%EXP_SPLITS%) do (
+for %%P in (%EXP_SPLITS% %EXP_EXTRA_SPLITS%) do (
   if not exist "%EXP_DATA_ROOT%\splits\%%P.json" (
     call :log missing split file %EXP_DATA_ROOT%\splits\%%P.json - run prepare_data.py first, not regenerating
     goto :fail
@@ -60,7 +62,7 @@ if /i "%ARM:~0,4%"=="yolo" set "FAM=yolo"
 if /i "%ARM%"=="frcnn" set "FAM=frcnn"
 if exist "%RUN%\summary_test.json" (
   call :log %TAG%: done already, skipping
-  exit /b 0
+  goto :extra
 )
 set "ABORT=%TAG%_aborted_%RANDOM%%RANDOM%"
 set "HAVEW="
@@ -87,7 +89,7 @@ if "%FAM%"=="frcnn" (
 
 :predict
 call :log %TAG%: predict val
-call :pred val || exit /b 1
+call :pred val "%SPLIT%" "%RUN%\preds_val.json" || exit /b 1
 call :log %TAG%: sweep threshold on val
 "%EXP_PYTHON%" scripts\evaluate.py --split "%SPLIT%" --subset val --preds "%RUN%\preds_val.json" --data-root "%EXP_DATA_ROOT%" --out "%RUN%\sweep_val.json" --sweep-thr || exit /b 1
 set "THR="
@@ -97,21 +99,45 @@ if not defined THR (
   exit /b 1
 )
 call :log %TAG%: predict test, best_thr=%THR%
-call :pred test || exit /b 1
+call :pred test "%SPLIT%" "%RUN%\preds_test.json" || exit /b 1
 call :log %TAG%: evaluate test at thr %THR%
 "%EXP_PYTHON%" scripts\evaluate.py --split "%SPLIT%" --subset test --preds "%RUN%\preds_test.json" --data-root "%EXP_DATA_ROOT%" --out "%RUN%\summary_test.json" --score-thr %THR% --map-ci-n 0 || exit /b 1
 call :log %TAG%: finished
+
+:extra
+for %%X in (%EXP_EXTRA_SPLITS%) do (
+  call :extra1 %%X || exit /b 1
+)
+exit /b 0
+
+:extra1
+rem %1 = extra split name; uses TAG RUN FAM from :one. Predict only (no retraining), scored at the run's own best_thr
+if exist "%RUN%\summary_%1.json" (
+  call :log %TAG%: %1 done already, skipping
+  exit /b 0
+)
+set "XSPLIT=%EXP_DATA_ROOT%\splits\%1.json"
+set "THR="
+for /f "usebackq delims=" %%T in (`call "%EXP_PYTHON%" -c "import json,sys; print(json.load(open(sys.argv[1]))['best_thr'])" "%RUN%\sweep_val.json"`) do set "THR=%%T"
+if not defined THR (
+  call :log %TAG%: could not read best_thr from sweep_val.json
+  exit /b 1
+)
+call :log %TAG%: predict %1, best_thr=%THR%
+call :pred test "%XSPLIT%" "%RUN%\preds_%1.json" || exit /b 1
+call :log %TAG%: evaluate %1 at thr %THR%
+"%EXP_PYTHON%" scripts\evaluate.py --split "%XSPLIT%" --subset test --preds "%RUN%\preds_%1.json" --data-root "%EXP_DATA_ROOT%" --out "%RUN%\summary_%1.json" --score-thr %THR% --map-ci-n 0 || exit /b 1
 exit /b 0
 
 :pred
-rem %1 = val or test; uses TAG RUN SPLIT FAM from :one (Ultralytics predict gets no --device: default 0)
+rem %1 = val or test; %2 = split json; %3 = output json; uses RUN FAM from :one (Ultralytics predict gets no --device: default 0)
 if "%FAM%"=="dccnet" (
-  "%EXP_PYTHON%" scripts\predict.py --run "%RUN%" --split "%SPLIT%" --subset %1 --data-root "%EXP_DATA_ROOT%" --out "%RUN%\preds_%1.json" %DEVARG% %EXP_PREDICT_ARGS% || exit /b 1
+  "%EXP_PYTHON%" scripts\predict.py --run "%RUN%" --split %2 --subset %1 --data-root "%EXP_DATA_ROOT%" --out %3 %DEVARG% %EXP_PREDICT_ARGS% || exit /b 1
 )
 if "%FAM%"=="yolo" (
-  "%EXP_PYTHON%" scripts\baselines\yolo_predict.py --weights "%RUN%\weights\best.pt" --split "%SPLIT%" --subset %1 --data-root "%EXP_DATA_ROOT%" --out "%RUN%\preds_%1.json" %EXP_PREDICT_ARGS% || exit /b 1
+  "%EXP_PYTHON%" scripts\baselines\yolo_predict.py --weights "%RUN%\weights\best.pt" --split %2 --subset %1 --data-root "%EXP_DATA_ROOT%" --out %3 %EXP_PREDICT_ARGS% || exit /b 1
 )
 if "%FAM%"=="frcnn" (
-  "%EXP_PYTHON%" scripts\baselines\frcnn_predict.py --run "%RUN%" --split "%SPLIT%" --subset %1 --data-root "%EXP_DATA_ROOT%" --out "%RUN%\preds_%1.json" %DEVARG% %EXP_PREDICT_ARGS% || exit /b 1
+  "%EXP_PYTHON%" scripts\baselines\frcnn_predict.py --run "%RUN%" --split %2 --subset %1 --data-root "%EXP_DATA_ROOT%" --out %3 %DEVARG% %EXP_PREDICT_ARGS% || exit /b 1
 )
 exit /b 0

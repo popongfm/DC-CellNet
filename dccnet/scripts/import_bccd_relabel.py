@@ -7,25 +7,101 @@ Usage (from dccnet/):
 --progress: print how many label files differ from the pre-label export (newline-normalised hash) and exit 0.
 Default: parse every labels/<stem>.txt; on any error list them all and write nothing; else write the v2 split
 (same image keys / order as --split) and <relabel-dir>/import_stats.json.
+
+Label-noise recheck (P3c step 7):
+--sample-recheck N [--seed S]: copy N deterministic random images (numpy default_rng(S).choice without replacement over
+the sorted stems) to <relabel-dir>/recheck/images/ with EMPTY label files in recheck/labels/ and classes.txt; refuses when
+recheck/labels/ exists (never overwrites).
+--recheck: compare the re-labelled recheck/labels/*.txt with the v2 split boxes (--out) of the same images, print the
+per-class F1@IoU0.5 and store it under "recheck" in import_stats.json (other keys are kept).
 """
 from __future__ import annotations
 
 import argparse
 import dataclasses
 import json
+import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dccnet.datasets.relabel import (compare_label_sets, from_yolo_lines, label_hash,  # noqa: E402
-                                     normalize_label_text)
+                                     normalize_label_text, per_class_f1, sample_stems)
 from dccnet.datasets.splits import read_split, write_split  # noqa: E402
 from dccnet.eval.export_json import image_key  # noqa: E402
 
 
 def _read_norm(path: Path) -> str:
     return normalize_label_text(path.read_text(encoding="utf-8"))
+
+
+def _sample_recheck(samples, rdir: Path, n: int, seed: int) -> int:
+    labels_dir = rdir / "recheck" / "labels"
+    if labels_dir.exists():
+        print(f"error: {labels_dir} exists; refusing to overwrite a recheck pass (delete the recheck folder to redo it)",
+              file=sys.stderr)
+        return 1
+    by_stem = {Path(s.image_path).stem: s for s in samples}
+    try:
+        stems = sample_stems(by_stem, n, seed)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    missing = [st for st in stems if not (rdir / "images" / by_stem[st].image_path.name).is_file()]
+    if missing:
+        print(f"error: {len(missing)} image(s) missing from {rdir / 'images'} (run prelabel_bccd.py first): "
+              f"{missing[:5]}", file=sys.stderr)
+        return 1
+    (rdir / "recheck" / "images").mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True)
+    for st in stems:
+        name = by_stem[st].image_path.name
+        shutil.copyfile(rdir / "images" / name, rdir / "recheck" / "images" / name)
+        (labels_dir / f"{st}.txt").write_text("", encoding="utf-8", newline="\n")
+    (rdir / "recheck" / "classes.txt").write_text("RBC\nWBC\nPlatelets\n", encoding="utf-8", newline="\n")
+    print(f"{n} images -> {rdir / 'recheck'} (seed {seed}); re-label them from scratch in X-AnyLabeling "
+          f"(Rule: every RBC whose visible outline is more than half the cell), then run --recheck")
+    return 0
+
+
+def _recheck(root: Path, rdir: Path, out: str, subset: str) -> int:
+    labels_dir = rdir / "recheck" / "labels"
+    files = sorted(labels_dir.glob("*.txt")) if labels_dir.is_dir() else []
+    if not files:
+        print(f"error: no recheck label files in {labels_dir}; run --sample-recheck first", file=sys.stderr)
+        return 1
+    if not (root / out).is_file():
+        print(f"error: {root / out} not found; run the import first", file=sys.stderr)
+        return 1
+    v2 = {Path(s.image_path).stem: s for s in read_split(root / out, root)[subset]}
+    errors, pairs = [], []
+    for p in files:
+        s = v2.get(p.stem)
+        if s is None:
+            errors.append(f"{p}: image {p.stem!r} is not in {out}")
+            continue
+        try:
+            nb, nl = from_yolo_lines(p.read_text(encoding="utf-8").splitlines(), s.width, s.height)
+        except ValueError as e:
+            errors.append(f"{p}: {e}")
+            continue
+        pairs.append((s.boxes, s.labels, nb, nl))
+    if errors:
+        print(f"error: {len(errors)} recheck label file(s) invalid; nothing written:", file=sys.stderr)
+        for e in errors:
+            print("  " + e, file=sys.stderr)
+        return 1
+    f1 = per_class_f1(pairs)
+    rec = {"n_images": len(pairs), "f1_iou50": f1, "n_boxes_v2": int(sum(len(p[0]) for p in pairs)),
+           "n_boxes_recheck": int(sum(len(p[2]) for p in pairs))}
+    sp = rdir / "import_stats.json"
+    stats = json.loads(sp.read_text(encoding="utf-8")) if sp.is_file() else {}
+    stats["recheck"] = rec
+    sp.write_text(json.dumps(stats, indent=1), encoding="utf-8", newline="\n")
+    print(f"recheck of {len(pairs)} images: per-class F1@IoU0.5 (v2 vs second pass) "
+          + "  ".join(f"{k}={'n/a' if v is None else format(v, '.4f')}" for k, v in f1.items()))
+    return 0
 
 
 def main(argv=None) -> int:
@@ -36,6 +112,9 @@ def main(argv=None) -> int:
     ap.add_argument("--subset", default="test")
     ap.add_argument("--out", default="splits/bccd_overlap_v2.json")
     ap.add_argument("--progress", action="store_true")
+    ap.add_argument("--sample-recheck", type=int, default=None, metavar="N")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--recheck", action="store_true")
     a = ap.parse_args(argv)
 
     root = a.data_root
@@ -54,6 +133,11 @@ def main(argv=None) -> int:
     else:
         manifest = {}
         print(f"warning: {mpath} missing; progress/stats cannot compare against the pre-label", file=sys.stderr)
+
+    if a.sample_recheck is not None:
+        return _sample_recheck(samples, rdir, a.sample_recheck, a.seed)
+    if a.recheck:
+        return _recheck(root, rdir, a.out, a.subset)
 
     if a.progress:
         changed = missing = 0

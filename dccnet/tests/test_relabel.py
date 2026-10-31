@@ -305,3 +305,60 @@ def test_import_rejects_duplicate_stems(tmp_path):
     (root / "splits" / "dup.json").write_text(json.dumps(sp))
     r = _import(root, "--split", "splits/dup.json")
     assert r.returncode != 0 and "duplicate" in r.stderr
+
+
+# ---- C3: label-noise recheck (sample, never overwrite, agreement F1) ----
+def _recheck_dirs(out):
+    return out / "recheck" / "images", out / "recheck" / "labels"
+
+
+def test_recheck_sample_and_agreement(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    assert _import(root).returncode == 0
+    r = _import(root, "--sample-recheck", "1", "--seed", "0")
+    assert r.returncode == 0, r.stderr
+    imgs, labs = _recheck_dirs(out)
+    first = sorted(p.name for p in imgs.iterdir())
+    assert len(first) == 1 and first[0].endswith(".jpg")
+    assert [p.name for p in labs.iterdir()] == [first[0].replace(".jpg", ".txt")]
+    assert all(p.read_text() == "" for p in labs.iterdir())
+    assert (out / "recheck" / "classes.txt").read_text() == "RBC\nWBC\nPlatelets\n"
+    # never overwrites: refuses and leaves Mickie's edits alone
+    (labs / (Path(first[0]).stem + ".txt")).write_text("edited\n")
+    r2 = _import(root, "--sample-recheck", "1", "--seed", "0")
+    assert r2.returncode != 0 and "recheck" in (r2.stderr + r2.stdout)
+    assert (labs / (Path(first[0]).stem + ".txt")).read_text() == "edited\n"
+    # deterministic for the same seed (after removing the folder), different draws are legal for other seeds
+    import shutil
+    shutil.rmtree(out / "recheck")
+    assert _import(root, "--sample-recheck", "1", "--seed", "0").returncode == 0
+    assert sorted(p.name for p in imgs.iterdir()) == first
+    shutil.rmtree(out / "recheck")
+    assert _import(root, "--sample-recheck", "3", "--seed", "0").returncode != 0  # only 2 images
+    assert not (out / "recheck" / "labels").exists()
+    assert _import(root, "--sample-recheck", "2", "--seed", "0").returncode == 0
+    stems = sorted(p.stem for p in labs.iterdir())
+    assert stems == ["BloodImage_00000", "BloodImage_00001"]
+    # identical second pass -> F1 1.0 for RBC, null for the classes absent from both; other stats keys survive
+    for st in stems:
+        shutil.copy(out / "labels" / f"{st}.txt", labs / f"{st}.txt")
+    r3 = _import(root, "--recheck")
+    assert r3.returncode == 0, r3.stderr
+    stats = json.loads((out / "import_stats.json").read_text())
+    assert stats["totals"]["n_images"] == 2 and "per_image" in stats
+    rc = stats["recheck"]
+    assert rc["n_images"] == 2 and rc["f1_iou50"] == {"RBC": 1.0, "WBC": None, "Platelets": None}
+    assert "RBC" in r3.stdout
+    # drop one of image 1's four boxes: kept 5 of 6 v2 boxes -> F1 = 2*5 / (6 + 5)
+    lines = (labs / "BloodImage_00001.txt").read_text().splitlines()
+    (labs / "BloodImage_00001.txt").write_text("\n".join(lines[:-1]) + "\n")
+    assert _import(root, "--recheck").returncode == 0
+    rc = json.loads((out / "import_stats.json").read_text())["recheck"]
+    assert rc["f1_iou50"]["RBC"] == pytest.approx(10 / 11)
+    # malformed recheck label -> error, import_stats untouched
+    before = (out / "import_stats.json").read_text()
+    (labs / "BloodImage_00000.txt").write_text("9 0.5 0.5 0.1 0.1\n")
+    r4 = _import(root, "--recheck")
+    assert r4.returncode != 0 and "BloodImage_00000" in r4.stderr
+    assert (out / "import_stats.json").read_text() == before

@@ -333,3 +333,13 @@ ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26
 3. X-AnyLabeling: open `data\bccd_relabel\images`, import the YOLO labels with `classes.txt`, work through `review_list.csv` top-down, and save as YOLO. Rule: label every RBC whose visible outline is more than half the cell, including cells cut by the image border.
 4. Any time: `python scripts\import_bccd_relabel.py --data-root data --progress` prints `<changed>/<total> label files edited since pre-label`.
 5. When done: `python scripts\import_bccd_relabel.py --data-root data` writes `data\splits\bccd_overlap_v2.json` (same image keys and order as `overlap_bccd.json`) and `data\bccd_relabel\import_stats.json`. Any missing or malformed label file is listed and nothing is written.
+6. Evaluate the trained arms on the original (`overlap_bccd`) and relabelled (`bccd_overlap_v2`) BCCD overlap sets. Needs the `pooled` runs and the `loso_BCCD` runs (P3b stage 2: `loso_BCCD` never saw a BCCD image, so it gives the unseen-source overlap result) to exist first; the runner skips training and the main-split predictions of finished runs and only predicts and scores the extra splits (`preds_<x>.json`, `summary_<x>.json` in each run dir, scored at the run's own val-swept `best_thr`; finished extras are skipped on a re-run). A missing `data\splits\<x>.json` is a failure:
+
+        set EXP_SPLITS=pooled loso_BCCD
+        set EXP_EXTRA_SPLITS=overlap_bccd bccd_overlap_v2
+        scripts\run_exp.bat
+
+        python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3c.md --splits pooled,loso_BCCD --extra overlap_bccd,bccd_overlap_v2
+
+   Section 5 of the report has, per extra split and training split, the per-arm table, the `d_both`-vs-arm paired comparisons, and a label-bias table (mAP50-95 and RBC MAE on v1 vs v2 and v2 minus v1, plus the `yolo_origin_kept` / `n_prelabel_added` totals from `import_stats.json`).
+7. Optional label-noise check: re-label 20 random v2 images from scratch. `python scripts\import_bccd_relabel.py --data-root data --sample-recheck 20 --seed 0` copies them to `data\bccd_relabel\recheck\images` with empty label files in `recheck\labels` (it refuses if `recheck\labels` exists; it never overwrites). Label them in X-AnyLabeling without looking at v2 (same rule as step 3), save as YOLO, then `python scripts\import_bccd_relabel.py --data-root data --recheck` prints the per-class F1 at IoU 0.5 between the two passes and stores it under `recheck` in `data\bccd_relabel\import_stats.json`.

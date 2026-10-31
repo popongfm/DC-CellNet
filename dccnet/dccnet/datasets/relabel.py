@@ -120,3 +120,33 @@ def compare_label_sets(old_boxes, old_labels, new_boxes, new_labels, iou: float 
 
 def label_hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def sample_stems(stems, n: int, seed: int) -> list[str]:
+    """Deterministic sample of ``n`` stems: numpy default_rng(seed).choice without replacement over the sorted stems."""
+    stems = sorted(stems)
+    if not 0 < n <= len(stems):
+        raise ValueError(f"cannot sample {n} of {len(stems)} images")
+    idx = np.random.default_rng(seed).choice(len(stems), size=n, replace=False)
+    return [stems[i] for i in idx]
+
+
+def per_class_f1(pairs, iou: float = 0.5, class_names=("RBC", "WBC", "Platelets")) -> dict:
+    """Micro-averaged per-class F1 between two label sets over images.
+
+    ``pairs`` = iterable of (old_boxes, old_labels, new_boxes, new_labels). Per class, greedy same-class matching
+    (``compare_label_sets``) at ``iou``; F1 = 2 * kept / (n_old + n_new) summed over images, None when both are 0.
+    """
+    kept = [0] * len(class_names)
+    n_old = [0] * len(class_names)
+    n_new = [0] * len(class_names)
+    for ob, ol, nb, nl in pairs:
+        ob, nb = np.asarray(ob, dtype=np.float32).reshape(-1, 4), np.asarray(nb, dtype=np.float32).reshape(-1, 4)
+        ol, nl = np.asarray(ol, dtype=np.int64).reshape(-1), np.asarray(nl, dtype=np.int64).reshape(-1)
+        for c in range(len(class_names)):
+            co, cn = ol == c, nl == c
+            kept[c] += compare_label_sets(ob[co], ol[co], nb[cn], nl[cn], iou)["kept"]
+            n_old[c] += int(co.sum())
+            n_new[c] += int(cn.sum())
+    return {name: (None if n_old[c] + n_new[c] == 0 else 2 * kept[c] / (n_old[c] + n_new[c]))
+            for c, name in enumerate(class_names)}
