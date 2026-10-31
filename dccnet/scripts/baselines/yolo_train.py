@@ -41,19 +41,23 @@ def count_epochs(csv_path: Path) -> int:
 
 
 def best_epoch_from_results(csv_path: Path) -> int:
-    """0-based row of max mAP50-95(B); first max on ties."""
+    """0-based row of max mAP50-95(B); LAST max on ties.
+
+    Ultralytics rewrites best.pt whenever ``best_fitness == fitness`` (trainer.save_model), so a later epoch
+    that ties the best overwrites it. results.csv values are rounded, so spurious ties are possible; accepted.
+    """
     vals = [float(r[FITNESS_COL]) for r in _read_rows(csv_path)]
     if not vals:
         raise ValueError(f"no rows in {csv_path}")
-    return max(range(len(vals)), key=lambda i: (vals[i], -i))
+    return max(range(len(vals)), key=lambda i: (vals[i], i))
 
 
 def best_epoch_from_ckpt(best_pt: Path, results_csv: Path | None = None) -> int:
     """0-based best epoch for a finished Ultralytics run.
 
     The final best.pt has been through ``strip_optimizer``, which sets ``epoch = -1``, so a value >= 0 is
-    used as-is but -1 (the expected case) falls back silently to results.csv: first max of mAP50-95(B)
-    (detection fitness is mAP50-95 only and best.pt is written on the first maximum). A missing key
+    used as-is but -1 (the expected case) falls back silently to results.csv: last max of mAP50-95(B)
+    (detection fitness is mAP50-95 only and best.pt is rewritten by every epoch that ties the best). A missing key
     also falls back, with a warning. Raises ValueError if the fallback is needed but unusable.
     """
     import torch

@@ -178,6 +178,7 @@ def main(argv=None) -> int:
     es = EarlyStopping(patience=args.patience)
     best_val: dict = {}
     metrics_path = run_dir / "metrics.jsonl"
+    metrics_path.write_text("")  # truncate once: an in-place retrain must not duplicate rows of a killed run
     step = 0
     epochs_run = 0
     t0 = time.time()
@@ -201,7 +202,8 @@ def main(argv=None) -> int:
     train_seconds = time.time() - t0
 
     summary = {"family": "frcnn", "best_epoch": es.best_epoch, "select_from_epoch": 0, "epochs_run": epochs_run,
-               "val": best_val, "config_stem": "frcnn", "train_seconds": train_seconds, "n_params": n_params}
+               "val": best_val, "config_stem": "frcnn", "train_seconds": train_seconds, "n_params": n_params,
+               "batch": args.batch, "accum_steps": args.accum_steps}
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"best epoch {es.best_epoch}: val {best_val}", flush=True)
     return 0

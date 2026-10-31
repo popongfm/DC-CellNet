@@ -55,7 +55,7 @@ def test_best_epoch_from_results(tmp_path):
     mod = _load_module()
     csv = tmp_path / "results.csv"
     csv.write_text("                  epoch,   metrics/mAP50-95(B)\n0, 0.1\n1, 0.5\n2, 0.5\n3, 0.3\n")
-    assert mod.best_epoch_from_results(csv) == 1
+    assert mod.best_epoch_from_results(csv) == 2  # last tie: Ultralytics rewrites best.pt on fitness == best
     assert mod.count_epochs(csv) == 4
 
 
@@ -94,7 +94,7 @@ def test_best_epoch_from_ckpt_stripped_minus_one(tmp_path, caplog):
     pt = tmp_path / "best.pt"
     torch.save({"epoch": -1}, pt)
     with caplog.at_level(logging.WARNING):
-        assert mod.best_epoch_from_ckpt(pt, csv) == 1
+        assert mod.best_epoch_from_ckpt(pt, csv) == 2
     assert caplog.text == ""
 
 

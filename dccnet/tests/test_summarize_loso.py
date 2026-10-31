@@ -342,3 +342,22 @@ def test_summary_mae_mismatch_warns(world):
 def test_empty_seeds_rejected(world):
     r = _cli(world, ["--seeds", ","])
     assert r.returncode == 2 and "--seeds" in r.stderr
+
+
+def test_non_protocol_batch_accum_warns(world):
+    _fill(world, splits=("pooled",))
+    runs = world["runs"]
+    # dccnet: config.yaml with batch 4 x accum 2 -> warns; batch 8 accum 1 -> silent; no config -> silent
+    (runs / "p3b_pooled_d_both_s0" / "config.yaml").write_text("train:\n  batch: 4\n  accum_steps: 2\n")
+    (runs / "p3b_pooled_d_both_s1" / "config.yaml").write_text("train:\n  batch: 8\n  accum_steps: 1\n")
+    # frcnn: summary.json batch 2 x accum 2 -> warns; protocol 4 x 1 -> silent; absent -> silent
+    for seed, (b, a) in {0: (2, 2), 1: (4, 1)}.items():
+        sp = runs / f"p3b_pooled_frcnn_s{seed}" / "summary.json"
+        s = json.loads(sp.read_text())
+        s.update({"batch": b, "accum_steps": a})
+        sp.write_text(json.dumps(s))
+    res = _summ(world, splits=("pooled",))
+    prot = [w for w in res["warnings"] if "non-protocol" in w]
+    assert len(prot) == 2
+    assert any(w.startswith("p3b_pooled_d_both_s0") and "batch 4" in w for w in prot)
+    assert any(w.startswith("p3b_pooled_frcnn_s0") and "accum_steps 2" in w for w in prot)

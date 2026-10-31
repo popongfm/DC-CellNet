@@ -137,7 +137,8 @@ def frcnn_run(tmp_path_factory):
 
 def test_frcnn_train_smoke(frcnn_run):
     run_dir = frcnn_run["run_dir"]
-    assert frcnn_run["elapsed"] < 60, f"smoke took {frcnn_run['elapsed']:.1f}s"
+    # generous bound: only catches a hang; wall-clock under CPU load was observed at 138 s
+    assert frcnn_run["elapsed"] < 300, f"smoke took {frcnn_run['elapsed']:.1f}s"
     assert {"best.pt", "summary.json", "metrics.jsonl"} <= {p.name for p in run_dir.iterdir()}
     assert not (run_dir / "best.pt.tmp").exists()
     rows = [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text().strip().splitlines()]
@@ -146,9 +147,10 @@ def test_frcnn_train_smoke(frcnn_run):
         assert np.isfinite(r["loss_total"]) and "val_mAP50_95" in r and "lr" in r
     summ = json.loads((run_dir / "summary.json").read_text())
     assert set(summ) == {"family", "best_epoch", "select_from_epoch", "epochs_run", "val", "config_stem",
-                         "train_seconds", "n_params"}
+                         "train_seconds", "n_params", "batch", "accum_steps"}
     assert summ["family"] == "frcnn" and summ["config_stem"] == "frcnn"
     assert summ["select_from_epoch"] == 0 and summ["best_epoch"] in (0, 1) and summ["epochs_run"] == 2
+    assert summ["batch"] == 2 and summ["accum_steps"] == 1
     assert summ["train_seconds"] > 0 and summ["n_params"] > 1_000_000
     assert summ["val"]["mAP50_95"] == rows[summ["best_epoch"]]["val_mAP50_95"]
     ckpt = torch.load(run_dir / "best.pt", map_location="cpu", weights_only=True)
@@ -191,6 +193,20 @@ def test_frcnn_train_refuses_existing_run(tmp_path):
         train.main(["--split", "splits/tiny.json", "--data-root", str(data_root), "--runs-dir",
                     str(tmp_path / "runs"), "--run-name", "r", "--seed", "0", "--no-pretrained",
                     "--epochs-max", "1", "--device", "cpu"])
+
+
+def test_frcnn_metrics_truncated_on_retrain(tmp_path):
+    """A run killed after its first metrics row but before best.pt must not duplicate that row on retrain."""
+    data_root, _ = _tiny_split(tmp_path)
+    runs = tmp_path / "runs"
+    (runs / "r").mkdir(parents=True)
+    (runs / "r" / "metrics.jsonl").write_text('{"epoch": 0, "stale": true}\n')
+    train = _load("frcnn_train", BASELINES / "frcnn_train.py")
+    assert train.main(["--split", "splits/tiny.json", "--data-root", str(data_root), "--runs-dir", str(runs),
+                       "--run-name", "r", "--seed", "0", "--no-pretrained", "--epochs-max", "1", "--batch", "2",
+                       "--min-size", "128", "--max-size", "128", "--device", "cpu"]) == 0
+    rows = [json.loads(x) for x in (runs / "r" / "metrics.jsonl").read_text().strip().splitlines()]
+    assert len(rows) == 1 and "stale" not in rows[0] and rows[0]["epoch"] == 0
 
 
 class _Boxes:

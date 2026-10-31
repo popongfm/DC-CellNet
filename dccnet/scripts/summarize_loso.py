@@ -70,6 +70,28 @@ def _read_json(path: Path):
     return json.loads(path.read_text()) if path.exists() else None
 
 
+def _protocol_warnings(name: str, arm: str, run_dir: Path, summary: dict) -> list[str]:
+    """One line when a run used a non-protocol batch / accumulation (DC-CellNet: batch 8, accum 1; FRCNN:
+    batch 4, accum 1; YOLO skipped). Missing or unreadable info gives no warning."""
+    try:
+        if arm == "frcnn":
+            batch, accum, ref = summary.get("batch"), summary.get("accum_steps"), 4
+        elif arm == "yolo26m":
+            return []
+        else:
+            import yaml
+            tr = (yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8")) or {}).get("train") or {}
+            batch, accum, ref = tr.get("batch"), tr.get("accum_steps"), 8
+    except Exception:
+        return []
+    bad_b = batch is not None and batch != ref
+    bad_a = accum not in (None, 1)
+    if not (bad_b or bad_a):
+        return []
+    return [f"{name}: non-protocol batch/accum (batch {batch}, accum_steps {accum}; protocol batch {ref}, "
+            f"accum 1)"]
+
+
 def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, seeds, warnings: list[str]) -> dict:
     """Load every requested run of one split.
 
@@ -127,6 +149,7 @@ def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, s
             if r["summary_mae"] is not None and abs(r["summary_mae"] - r["mae"]) > 1e-6:
                 warnings.append(f"{name}: recomputed RBC MAE {r['mae']:.4f} != summary_test.json "
                                 f"{r['summary_mae']:.4f}")
+            warnings.extend(_protocol_warnings(name, arm, d, summary))
             ce = count_errors(samples, preds, r["thr"], data_root)
             coco = test.get("coco") or {}
             r.update({"dir": d, "map50": coco.get("mAP50"), "ap_class": coco.get("per_class_50_95") or {},

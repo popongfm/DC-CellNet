@@ -287,9 +287,18 @@ Then one extra DC-CellNet run to exercise AMP plus gradient accumulation on CUDA
     set EXP_RUNS_DIR=runs_smoke_p3b_accum
     scripts\run_exp.bat
 
-Check that every `runs_smoke_p3b\p3b_pooled_*_s0` has `summary_test.json`, and tell Claude if anything failed. Reset the variables before the real run (`set EXP_ARMS=`, `set EXP_SEEDS=`, `set EXP_TRAIN_ARGS=`, `set EXP_RUNS_DIR=`).
+Check that every `runs_smoke_p3b\p3b_pooled_*_s0` has `summary_test.json`, and tell Claude if anything failed.
 
-Out of memory: never shrink the effective batch (the runner skips finished runs, so re-running with only the OOM'd arm is safe). DC-CellNet arms: `set EXP_ARMS=d_both d_sigma circlenet` and `set EXP_TRAIN_ARGS=--batch 4 --accum-steps 2`. Faster R-CNN (protocol batch is already 4): `set EXP_ARMS=frcnn` as its own pass with `set EXP_TRAIN_ARGS=--batch 2 --accum-steps 2` (not `--batch 4 --accum-steps 2`, which would double the effective batch). YOLO: `set EXP_ARMS=yolo26m` and lower `--batch` only (e.g. `--batch 4`); Ultralytics `nbs` keeps the effective batch.
+Then exercise the `.bat` resume branches (they must work before the unattended launch). Use the first smoke variables again (`set EXP_ARMS=`, `set EXP_SEEDS=0`, `set EXP_TRAIN_ARGS=--epochs-max 1`, `set EXP_RUNS_DIR=runs_smoke_p3b`):
+
+1. Re-run `scripts\run_exp.bat` unchanged. Expected: one "done already, skipping" line per run and no training at all.
+2. Delete one run's result, e.g. `del runs_smoke_p3b\p3b_pooled_frcnn_s0\summary_test.json`, and re-run. Expected: for that run only, "summary.json exists, skipping train" followed by predict/evaluate (no training), and `summary_test.json` is back; all other runs print "done already, skipping".
+
+If either expectation fails, stop, do not start the real run, and report the log `runs_smoke_p3b\exp_runner.log`. Reset the variables before the real run (`set EXP_ARMS=`, `set EXP_SEEDS=`, `set EXP_TRAIN_ARGS=`, `set EXP_RUNS_DIR=`).
+
+Out of memory (repeat any per-family recipe below for stage 2 too, see there): never shrink the effective batch (the runner skips finished runs, so re-running with only the OOM'd arm is safe). DC-CellNet arms: `set EXP_ARMS=d_both d_sigma circlenet` and `set EXP_TRAIN_ARGS=--batch 4 --accum-steps 2`. Faster R-CNN (protocol batch is already 4): `set EXP_ARMS=frcnn` as its own pass with `set EXP_TRAIN_ARGS=--batch 2 --accum-steps 2` (not `--batch 4 --accum-steps 2`, which would double the effective batch). YOLO: `set EXP_ARMS=yolo26m` and lower `--batch` only (e.g. `--batch 4`); Ultralytics `nbs` keeps the effective batch.
+
+Before the real run (3-5 days): set Windows power to never sleep and pause Windows Update for the whole duration.
 
 Real run, stage 1: pooled split, 5 arms x 3 seeds = 15 runs:
 
@@ -300,7 +309,7 @@ Then summarise and apply the stop/go rule (spec section 3.2: `d_both` vs `circle
 
     python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3b_stage1.md --splits pooled
 
-Stage 2: the four leave-one-source-out folds (60 more runs):
+Stage 2: the four leave-one-source-out folds (60 more runs). If stage 1 needed a per-family OOM recipe (separate `EXP_ARMS` passes with their own `EXP_TRAIN_ARGS`), repeat exactly the same passes for stage 2 with `EXP_SPLITS` set to the LOSO folds; otherwise the default args OOM again and the runner halts.
 
     set EXP_SPLITS=loso_BCCD loso_BCDD loso_PBC loso_Raabin
     scripts\run_exp.bat
@@ -309,7 +318,7 @@ Stage 2: the four leave-one-source-out folds (60 more runs):
 
 Each summarize command writes the markdown report plus the same numbers as `.json` next to it (`reports/p3b_stage1.json`, `reports/p3b.json`) and prints the verdict lines; the last line is `pooled stop/go: d_both vs circlenet = GO / NO-GO / INCONCLUSIVE`. INCONCLUSIVE means a run (seed or LOSO fold) is missing or incomplete; the report's Warnings section names it. The per-run mAP bootstrap CI (`--map-ci-n 1000`, seed-0 run of every split x arm) is the slow part, roughly 2 min per pooled run and up to ~8 min per LOSO fold run on a CPU; add `--map-ci-n 0` for a quick look.
 
-Send the results back (Git Bash or WSL, from `dccnet`):
+Send the results back. First check `runs\p3b_pooled_d_both_s0\preds_test.json` (and after stage 2 a LOSO one): DC-CellNet can write up to 1000 records per image, so LOSO predictions may reach 100+ MB per run, and the tar may be too large to send as is. Then (Git Bash or WSL, from `dccnet`):
 
     tar czf runs_p3b.tgz --ignore-failed-read --exclude="*_aborted_*" data/splits/pooled.json data/splits/loso_*.json runs/p3b_*/{summary.json,summary_test.json,sweep_val.json,preds_test.json,metrics.jsonl,results.csv} reports/p3b*.md reports/p3b*.json
 
