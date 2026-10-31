@@ -12,7 +12,7 @@ from dccnet.types import Sample
 N_BINS = 4
 
 
-def _iou_xyxy(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+def iou_xyxy(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
     ix = np.clip(np.minimum(box[2], boxes[:, 2]) - np.maximum(box[0], boxes[:, 0]), 0, None)
     iy = np.clip(np.minimum(box[3], boxes[:, 3]) - np.maximum(box[1], boxes[:, 1]), 0, None)
     inter = ix * iy
@@ -43,7 +43,7 @@ def overlap_counts(samples: list[Sample], preds: list[dict], score_thr: float, d
             for row in pk:
                 box = np.array([row[1], row[2], row[1] + row[3], row[2] + row[4]])
                 if len(gidx):
-                    iou = _iou_xyxy(box, gt[gidx])
+                    iou = iou_xyxy(box, gt[gidx])
                     iou[matched] = -1.0
                     j = int(np.argmax(iou))
                     if iou[j] >= iou_thr:
