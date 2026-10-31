@@ -118,9 +118,10 @@ def predict_split(model, samples: list[Sample], data_root: Path, device, batch: 
 def lr_factor(step: int, epoch: int, warmup_iters: int = WARMUP_ITERS, milestones=MILESTONES,
               gamma: float = GAMMA, warmup_factor: float = WARMUP_FACTOR) -> float:
     """LR multiplier after ``step`` optimizer steps in (0-based) ``epoch``: LinearLR warmup from
-    ``warmup_factor`` to 1 over ``warmup_iters`` steps, times MultiStepLR ``gamma`` per milestone reached."""
+    ``warmup_factor`` to 1 over ``warmup_iters`` steps in epoch 0 only (torchvision reference), times
+    MultiStepLR ``gamma`` per milestone reached."""
     w = 1.0
-    if step < warmup_iters:
+    if epoch == 0 and step < warmup_iters:
         alpha = step / warmup_iters
         w = warmup_factor * (1.0 - alpha) + alpha
     return w * gamma ** sum(int(epoch) >= m for m in milestones)

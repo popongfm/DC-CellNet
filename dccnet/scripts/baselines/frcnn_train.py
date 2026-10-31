@@ -5,8 +5,9 @@ Usage (from dccnet/):
         --runs-dir runs --run-name p3b_pooled_frcnn_s0 --seed 0 [--epochs-max 50] [--patience 10] \
         [--batch 4] [--accum-steps 1] [--device cuda] [--no-pretrained] [--min-size 800] [--max-size 1333]
 
---split is relative to --data-root. Schedule: SGD (lr 0.005, momentum 0.9, wd 1e-4); linear warmup from
-0.001x over the first min(1000, total optimizer steps - 1) optimizer steps; x0.1 at epochs 32 and 42.
+--split is relative to --data-root. Schedule: SGD (lr 0.005, momentum 0.9, wd 1e-4); as the torchvision
+reference, linear warmup from 0.001x in epoch 0 only, over min(1000, optimizer steps in epoch 0 - 1)
+steps (factor 1 from epoch 1 on); x0.1 at epochs 32 and 42.
 Every epoch: val mAP50-95 (dccnet.eval.coco_eval.coco_map); early stopping with --patience on it
 (strictly greater = better). Run dir: metrics.jsonl, best.pt ({"model", "epoch", "args"}), summary.json.
 OOM policy: lower --batch and raise --accum-steps to keep the effective batch (e.g. --batch 2 --accum-steps 2).
@@ -58,28 +59,48 @@ def _set_lr(opt, factor: float) -> float:
     return lr
 
 
+def window_size(bi: int, accum: int, n_batches: int) -> int:
+    """Number of micro-batches in the accumulation window holding batch ``bi`` (the last one may be short)."""
+    start = (bi // accum) * accum
+    return min(accum, n_batches - start)
+
+
+def should_step(n_finite: int) -> bool:
+    """Step the optimizer only if the window produced gradients (GradScaler.step asserts otherwise)."""
+    return n_finite > 0
+
+
+def warmup_iters_for(steps_epoch0: int) -> int:
+    """torchvision reference: warmup over min(1000, optimizer steps in epoch 0 - 1) steps."""
+    return max(0, min(fc.WARMUP_ITERS, int(steps_epoch0) - 1))
+
+
 def train_one_epoch(model, loader, opt, scaler, device, epoch: int, step: int, warmup_iters: int,
                     accum: int, amp: bool) -> tuple[dict, int]:
-    """One epoch with gradient accumulation (loss / accum; optimizer step every ``accum`` micro-batches
-    and at epoch end). Returns (mean losses + lr + nonfinite_steps, optimizer steps done so far)."""
+    """One epoch with gradient accumulation: each micro-batch loss is divided by its window's real size
+    (``accum``, or fewer for the last window); optimizer step at every window end. Non-finite micro-batches
+    are skipped; a window with no finite micro-batch skips the optimizer step and does not advance ``step``.
+    Returns (mean losses + lr + nonfinite_steps, optimizer steps done so far)."""
     model.train()
     sums = {k: 0.0 for k in ("loss_total", *LOSS_NAMES)}
-    n_ok = n_bad = 0
+    n_ok = n_bad = n_win_ok = 0
     lr = opt.param_groups[0]["lr"]
     n_batches = len(loader)
     opt.zero_grad(set_to_none=True)
     for bi, (images, targets) in enumerate(loader):
+        n_win = window_size(bi, accum, n_batches)
         images = [im.to(device) for im in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         with torch.autocast(device_type=device.type, enabled=amp):
             loss_dict = model(images, targets)
         loss = sum(loss_dict.values())
         if torch.isfinite(loss):
-            scaled = loss / accum
+            scaled = loss / n_win
             if scaler is not None:
                 scaled = scaler.scale(scaled)
             scaled.backward()
             n_ok += 1
+            n_win_ok += 1
             sums["loss_total"] += float(loss.detach())
             for k in LOSS_NAMES:
                 sums[k] += float(loss_dict[k].detach())
@@ -87,14 +108,18 @@ def train_one_epoch(model, loader, opt, scaler, device, epoch: int, step: int, w
             n_bad += 1
             log.warning("epoch %d batch %d: non-finite loss, micro-batch skipped", epoch, bi)
         if (bi + 1) % accum == 0 or bi + 1 == n_batches:
-            lr = _set_lr(opt, fc.lr_factor(step, epoch, warmup_iters))
-            if scaler is not None:
-                scaler.step(opt)
-                scaler.update()
+            if should_step(n_win_ok):
+                lr = _set_lr(opt, fc.lr_factor(step, epoch, warmup_iters))
+                if scaler is not None:
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
+                step += 1
             else:
-                opt.step()
+                log.warning("epoch %d batch %d: no finite loss in the window, optimizer step skipped", epoch, bi)
             opt.zero_grad(set_to_none=True)
-            step += 1
+            n_win_ok = 0
     if n_ok == 0:
         raise RuntimeError(f"epoch {epoch}: every training loss was non-finite")
     out = {k: v / n_ok for k, v in sums.items()}
@@ -146,7 +171,7 @@ def main(argv=None) -> int:
     opt = torch.optim.SGD(params, lr=LR, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY)
     scaler = torch.amp.GradScaler("cuda") if amp else None
     steps_per_epoch = math.ceil(len(loader) / args.accum_steps)
-    warmup_iters = max(0, min(fc.WARMUP_ITERS, steps_per_epoch * args.epochs_max - 1))
+    warmup_iters = warmup_iters_for(steps_per_epoch)
     saved_args = {k: (v.as_posix() if isinstance(v, Path) else v) for k, v in vars(args).items()}
 
     print(f"run dir: {run_dir}  device: {device}  train {len(train_samples)} / val {len(val_samples)}", flush=True)

@@ -236,3 +236,96 @@ def test_image_key_parity(frcnn_run):
     key_sets = {name: {r["image"] for r in recs} for name, recs in (("frcnn", fr), ("dccnet", dc), ("yolo", yl))}
     for name, ks in key_sets.items():
         assert ks == expected, name
+
+
+def test_dataset_drops_box_under_1px_high(tmp_path, common):
+    p = tmp_path / "a.png"
+    _blank_image(p, 64, 48)
+    s = Sample(p, "T", 64, 48, np.array([[1, 2, 11, 12], [20, 5, 30, 5.6]], np.float32), np.array([2, 0], np.int64))
+    _, tgt = common.SplitDetDataset([s], train=False)[0]
+    assert tgt["boxes"].tolist() == [[1, 2, 11, 12]] and tgt["labels"].tolist() == [3]
+
+
+def test_lr_factor_warmup_only_in_epoch_0(common):
+    assert common.lr_factor(0, 1, warmup_iters=10) == pytest.approx(1.0)
+    assert common.lr_factor(3, 1, warmup_iters=10) == pytest.approx(1.0)
+    assert common.lr_factor(3, 0, warmup_iters=10) == pytest.approx(0.001 + 0.999 * 0.3)
+
+
+@pytest.fixture
+def train_mod():
+    return _load("frcnn_train_fix", BASELINES / "frcnn_train.py")
+
+
+def test_window_size_and_should_step(train_mod):
+    ws = train_mod.window_size
+    assert [ws(b, 2, 5) for b in range(5)] == [2, 2, 2, 2, 1]
+    assert [ws(b, 3, 4) for b in range(4)] == [3, 3, 3, 1]
+    assert [ws(b, 1, 3) for b in range(3)] == [1, 1, 1]
+    assert train_mod.should_step(1) and train_mod.should_step(3) and not train_mod.should_step(0)
+
+
+class _ToyDet(torch.nn.Module):
+    """Stand-in detector: loss = w * x (x from the image), NaN on the call indices in ``nan_calls``."""
+
+    def __init__(self, nan_calls=()):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.ones(()))
+        self.nan_calls, self.calls, self.grads = set(nan_calls), 0, []
+
+    def forward(self, images, targets):
+        v = self.w * torch.stack([im.sum() for im in images]).sum()
+        if self.calls in self.nan_calls:
+            v = v * float("nan")
+        self.calls += 1
+        return {k: v / 4 for k in ("loss_classifier", "loss_box_reg", "loss_objectness", "loss_rpn_box_reg")}
+
+
+def _toy_loader(values):
+    return [([torch.full((1,), float(v))], [{"labels": torch.zeros(0, dtype=torch.int64)}]) for v in values]
+
+
+class _RecordingSGD(torch.optim.SGD):
+    def __init__(self, params, model):
+        super().__init__(params, lr=0.005)
+        self.model, self.lrs, self.grads = model, [], []
+
+    def step(self, closure=None):
+        self.lrs.append(self.param_groups[0]["lr"])
+        self.grads.append(None if self.model.w.grad is None else float(self.model.w.grad))
+        return super().step(closure)
+
+
+def test_nonfinite_window_is_skipped_without_step(train_mod, caplog):
+    model = _ToyDet(nan_calls={1})
+    opt = _RecordingSGD(model.parameters(), model)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)  # same code path as AMP, inert on CPU
+    with caplog.at_level("WARNING", logger="frcnn_train"):
+        out, step = train_mod.train_one_epoch(model, _toy_loader([1, 2, 3]), opt, scaler, torch.device("cpu"),
+                                              epoch=0, step=0, warmup_iters=2, accum=1, amp=False)
+    assert step == 2 and out["nonfinite_steps"] == 1 and len(opt.lrs) == 2
+    assert "non-finite" in caplog.text and "optimizer step skipped" in caplog.text
+    assert opt.lrs == pytest.approx([0.005 * 0.001, 0.005 * (0.001 * 0.5 + 0.5)])  # counter did not advance
+    assert all(g is not None for g in opt.grads)
+
+
+def test_partial_last_window_scaled_by_its_size(train_mod):
+    model = _ToyDet()
+    opt = _RecordingSGD(model.parameters(), model)
+    _, step = train_mod.train_one_epoch(model, _toy_loader([1, 3, 10]), opt, None, torch.device("cpu"),
+                                        epoch=1, step=0, warmup_iters=0, accum=2, amp=False)
+    # loss = w * x -> dL/dw = x; window 1 = (1 + 3) / 2, window 2 = 10 / 1 (not 10 / 2)
+    assert step == 2 and opt.grads == pytest.approx([2.0, 10.0])
+
+
+def test_warmup_reaches_base_lr_at_end_of_epoch_0(train_mod):
+    model = _ToyDet()
+    opt = _RecordingSGD(model.parameters(), model)
+    loader = _toy_loader([1, 1, 1, 1])
+    warmup = train_mod.warmup_iters_for(steps_epoch0=len(loader))
+    assert warmup == 3
+    _, step = train_mod.train_one_epoch(model, loader, opt, None, torch.device("cpu"), 0, 0, warmup, 1, False)
+    _, step = train_mod.train_one_epoch(model, loader, opt, None, torch.device("cpu"), 1, step, warmup, 1, False)
+    assert opt.lrs[3] == pytest.approx(0.005) and opt.lrs[4:] == pytest.approx([0.005] * 4)
+    assert opt.lrs[0] == pytest.approx(0.005 * 0.001)
+    assert train_mod.warmup_iters_for(steps_epoch0=5000) == 1000 and train_mod.warmup_iters_for(1) == 0
