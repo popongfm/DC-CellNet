@@ -307,6 +307,8 @@ Stage 2: the four leave-one-source-out folds (60 more runs):
 
     python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3b.md
 
+Each summarize command writes the markdown report plus the same numbers as `.json` next to it (`reports/p3b_stage1.json`, `reports/p3b.json`) and prints the verdict lines; the last line is `pooled stop/go: d_both vs circlenet = GO / NO-GO / INCONCLUSIVE`. INCONCLUSIVE means a run (seed or LOSO fold) is missing or incomplete; the report's Warnings section names it. The per-run mAP bootstrap CI (`--map-ci-n 1000`, seed-0 run of every split x arm) is the slow part, roughly 2 min per pooled run and up to ~8 min per LOSO fold run on a CPU; add `--map-ci-n 0` for a quick look.
+
 Send the results back (Git Bash or WSL, from `dccnet`):
 
     tar czf runs_p3b.tgz --ignore-failed-read --exclude="*_aborted_*" data/splits/pooled.json data/splits/loso_*.json runs/p3b_*/{summary.json,summary_test.json,sweep_val.json,preds_test.json,metrics.jsonl,results.csv} reports/p3b*.md
