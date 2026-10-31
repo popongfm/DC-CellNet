@@ -272,7 +272,7 @@ Setup (once, in the dccnet conda env, from `C:\Research\dccnet`):
 
 `pip install ultralytics` takes whatever version pip resolves today; copy the `Version:` line of `pip show ultralytics` into your notes / the chat so the report can state it. The YOLO arm exports the split to `data\yolo_p3b_<split>\` (labels taken from the split JSON in our class order 0 RBC, 1 WBC, 2 Platelets); it never touches `data\yolo_pooled\`.
 
-Smoke test (all 5 arms, pooled, seed 0, 1 epoch each; roughly 30-60 min, separate runs dir):
+Smoke test (all 6 arms, pooled, seed 0, 1 epoch each; roughly 30-60 min, separate runs dir):
 
     set EXP_SEEDS=0
     set EXP_TRAIN_ARGS=--epochs-max 1
@@ -296,11 +296,11 @@ Then exercise the `.bat` resume branches (they must work before the unattended l
 
 If either expectation fails, stop, do not start the real run, and report the log `runs_smoke_p3b\exp_runner.log`. Reset the variables before the real run (`set EXP_ARMS=`, `set EXP_SEEDS=`, `set EXP_TRAIN_ARGS=`, `set EXP_RUNS_DIR=`).
 
-Out of memory (repeat any per-family recipe below for stage 2 too, see there): never shrink the effective batch (the runner skips finished runs, so re-running with only the OOM'd arm is safe). DC-CellNet arms: `set EXP_ARMS=d_both d_sigma circlenet` and `set EXP_TRAIN_ARGS=--batch 4 --accum-steps 2`. Faster R-CNN (protocol batch is already 4): `set EXP_ARMS=frcnn` as its own pass with `set EXP_TRAIN_ARGS=--batch 2 --accum-steps 2` (not `--batch 4 --accum-steps 2`, which would double the effective batch). YOLO: `set EXP_ARMS=yolo26m` and lower `--batch` only (e.g. `--batch 4`); Ultralytics `nbs` keeps the effective batch.
+Out of memory (repeat any per-family recipe below for stage 2 too, see there): never shrink the effective batch (the runner skips finished runs, so re-running with only the OOM'd arm is safe). DC-CellNet arms: `set EXP_ARMS=d_both d_sigma circlenet repel` and `set EXP_TRAIN_ARGS=--batch 4 --accum-steps 2`. Faster R-CNN (protocol batch is already 4): `set EXP_ARMS=frcnn` as its own pass with `set EXP_TRAIN_ARGS=--batch 2 --accum-steps 2` (not `--batch 4 --accum-steps 2`, which would double the effective batch). YOLO: `set EXP_ARMS=yolo26m` and lower `--batch` only (e.g. `--batch 4`); Ultralytics `nbs` keeps the effective batch.
 
 Before the real run (3-5 days): set Windows power to never sleep and pause Windows Update for the whole duration.
 
-Real run, stage 1: pooled split, 5 arms x 3 seeds = 15 runs:
+Real run, stage 1: pooled split, 6 arms x 3 seeds = 18 runs (arms: d_both d_sigma circlenet repel yolo26m frcnn; `repel` = d_both setup with the repel target of Liang et al., added after P3a showed it is at least as good as d_both on synthetic):
 
     set EXP_SPLITS=pooled
     scripts\run_exp.bat
@@ -309,7 +309,7 @@ Then summarise and apply the stop/go rule (spec section 3.2: `d_both` vs `circle
 
     python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3b_stage1.md --splits pooled
 
-Stage 2: the four leave-one-source-out folds (60 more runs). If stage 1 needed a per-family OOM recipe (separate `EXP_ARMS` passes with their own `EXP_TRAIN_ARGS`), repeat exactly the same passes for stage 2 with `EXP_SPLITS` set to the LOSO folds; otherwise the default args OOM again and the runner halts.
+Stage 2: the four leave-one-source-out folds (72 more runs). If stage 1 needed a per-family OOM recipe (separate `EXP_ARMS` passes with their own `EXP_TRAIN_ARGS`), repeat exactly the same passes for stage 2 with `EXP_SPLITS` set to the LOSO folds; otherwise the default args OOM again and the runner halts.
 
     set EXP_SPLITS=loso_BCCD loso_BCDD loso_PBC loso_Raabin
     scripts\run_exp.bat
@@ -324,7 +324,7 @@ Send the results back. First check `runs\p3b_pooled_d_both_s0\preds_test.json` (
 
 YOLO runs have no `metrics.jsonl` (they write `results.csv`) and DC-CellNet/FRCNN runs have no `results.csv`; `--ignore-failed-read` turns those missing-file errors into warnings, and `--exclude` keeps renamed `*_aborted_*` run dirs out of the archive.
 
-ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26m roughly 1-1.5 h, Faster R-CNN roughly 2-3 h; stage 1 is about 25-35 h, stage 2 about 4x that. The estimate is rough; the smoke run's per-epoch times give the real figure.
+ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26m roughly 1-1.5 h, Faster R-CNN roughly 2-3 h; stage 1 is about 30-40 h, stage 2 about 4x that. The estimate is rough; the smoke run's per-epoch times give the real figure.
 
 ## P3c — BCCD overlap relabel
 

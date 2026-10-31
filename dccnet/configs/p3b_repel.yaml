@@ -1,0 +1,21 @@
+# P3b arm repel: d_both setup (stride 2) with the repel code of Liang et al. instead of the adaptive Gaussian (prior-work target; P3a showed repel >= d_both on synthetic)
+_base_: base.yaml
+model:
+  pretrained: true
+  out_stride: 2
+  heads:
+    density: false
+loss:
+  cc:
+    enabled: false
+train:
+  epochs_max: 150
+  patience: 30
+  select_from_epoch: 0
+  batch: 8
+  amp: true
+data:
+  split: splits/pooled.json  # relative to --data-root; runner overrides with --split
+  stride: 2
+  heatmap_sigma: radius
+  heatmap_shape: repel

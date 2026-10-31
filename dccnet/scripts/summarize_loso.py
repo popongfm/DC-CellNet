@@ -2,7 +2,7 @@
 
 Usage (from dccnet/):
     python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3b.md
-        [--splits pooled,loso_BCCD,loso_BCDD,loso_PBC,loso_Raabin] [--arms d_both,d_sigma,circlenet,yolo26m,frcnn]
+        [--splits pooled,loso_BCCD,loso_BCDD,loso_PBC,loso_Raabin] [--arms d_both,d_sigma,circlenet,repel,yolo26m,frcnn]
         [--candidate d_both] [--seeds 0,1,2] [--map-ci-n 1000] [--n-boot 1000] [--extra overlap_bccd,bccd_overlap_v2]
 
 Run dirs are ``<runs-dir>/<prefix>_<split>_<arm>_s<seed>`` (scripts/run_exp.*); test images come from
@@ -55,7 +55,7 @@ from dccnet.eval.overlap_bins import N_BINS  # noqa: E402
 
 FOLDS = ("loso_BCCD", "loso_BCDD", "loso_PBC", "loso_Raabin")  # fixed concatenation order
 SPLITS = ("pooled",) + FOLDS
-ARMS = ("d_both", "d_sigma", "circlenet", "yolo26m", "frcnn")
+ARMS = ("d_both", "d_sigma", "circlenet", "repel", "yolo26m", "frcnn")
 STAGE1 = ("d_both", "circlenet")
 EXTRA_TRAIN_SPLITS = ("pooled", "loso_BCCD")  # training splits whose runs are evaluated on the extra splits
 V1, V2 = "overlap_bccd", "bccd_overlap_v2"  # original / relabelled BCCD overlap sets (label-bias table)

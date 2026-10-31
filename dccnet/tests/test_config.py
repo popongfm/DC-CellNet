@@ -129,7 +129,9 @@ P3B_ARMS = {  # name -> (data.stride, model.out_stride, data.heatmap_sigma)
     "p3b_d_both.yaml": (2, 2, "adaptive"),
     "p3b_d_sigma.yaml": (4, 4, "adaptive"),
     "p3b_circlenet.yaml": (4, 4, "radius"),
+    "p3b_repel.yaml": (2, 2, "radius"),
 }
+P3B_SHAPE = {"p3b_repel.yaml": "repel"}
 
 
 @pytest.mark.parametrize("name", sorted(P3B_ARMS))
@@ -147,7 +149,8 @@ def test_p3b_configs(name):
     assert cfg["model"]["pretrained"] is True
     stride, out_stride, sigma = P3B_ARMS[name]
     assert (cfg["data"]["stride"], cfg["model"]["out_stride"], cfg["data"]["heatmap_sigma"]) == (stride, out_stride, sigma)
-    assert cfg["data"]["heatmap_divisor"] == 4 and cfg["data"]["heatmap_shape"] == "gaussian"
+    assert cfg["data"]["heatmap_divisor"] == 4
+    assert cfg["data"]["heatmap_shape"] == P3B_SHAPE.get(name, "gaussian")
     assert cfg["data"]["split"] == "splits/pooled.json"
     # augmentation unchanged from base.yaml
     assert cfg["aug"] == load_config(d / "base.yaml")["aug"]
@@ -160,6 +163,15 @@ def test_p3b_d_both_matches_m2_d_both_model_and_targets():
     assert p3b["model"] == m2["model"]
     assert {k: v for k, v in p3b["data"].items() if k != "split"} == \
         {k: v for k, v in m2["data"].items() if k != "split"}
+
+
+def test_p3b_repel_matches_p3a_repel_model_and_targets():
+    from pathlib import Path
+    d = Path(__file__).resolve().parents[1] / "configs"
+    p3b, p3a = load_config(d / "p3b_repel.yaml"), load_config(d / "exp_m2_p3a_repel.yaml")
+    assert p3b["model"] == p3a["model"]
+    assert {k: v for k, v in p3b["data"].items() if k != "split"} == \
+        {k: v for k, v in p3a["data"].items() if k != "split"}
 
 
 def test_base_accum_steps_default():

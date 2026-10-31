@@ -11,7 +11,7 @@
 # Splits are never regenerated: a missing <data-root>/splits/<split>.json is a failure. Stops at the first failing command.
 #
 # Environment variables (defaults): EXP_PYTHON (python)  EXP_DATA_ROOT (data)  EXP_RUNS_DIR (runs)  EXP_CONFIG_DIR (configs)
-#   EXP_PREFIX (p3b)  EXP_SPLITS (pooled)  EXP_ARMS ("d_both d_sigma circlenet yolo26m frcnn")  EXP_SEEDS ("0 1 2")
+#   EXP_PREFIX (p3b)  EXP_SPLITS (pooled)  EXP_ARMS ("d_both d_sigma circlenet repel yolo26m frcnn")  EXP_SEEDS ("0 1 2")
 #   EXP_EXTRA_SPLITS (unset; extra eval splits, e.g. "overlap_bccd bccd_overlap_v2")
 #   EXP_DEVICE (unset; --device for dccnet and frcnn scripts only, Ultralytics keeps its default 0)
 #   EXP_TRAIN_ARGS (unset; appended to every train command, e.g. "--epochs-max 1")  EXP_PREDICT_ARGS (unset)
@@ -24,7 +24,7 @@ RUNS="${EXP_RUNS_DIR:-runs}"
 CFGDIR="${EXP_CONFIG_DIR:-configs}"
 PREFIX="${EXP_PREFIX:-p3b}"
 SPLITS="${EXP_SPLITS:-pooled}"
-ARMS="${EXP_ARMS:-d_both d_sigma circlenet yolo26m frcnn}"
+ARMS="${EXP_ARMS:-d_both d_sigma circlenet repel yolo26m frcnn}"
 SEEDS="${EXP_SEEDS:-0 1 2}"
 EXTRA="${EXP_EXTRA_SPLITS:-}"
 DEV=()
