@@ -19,8 +19,8 @@
 | Phase 3 spec | ✅ อนุมัติแล้ว | `docs/specs/2026-10-30-phase3-design.md` |
 | P3a plan | ✅ | `docs/plans/2026-10-30-phase3-p3a.md` |
 | **P3a Task A1 (target variants + configs)** | ✅ commit eeb5f06 บน `dccnet` (ตัวที่เครื่อง Mickie รันอยู่) | รอผล real run (README "P3a") |
-| P3b plan (TXL-PBC LOSO 75 runs) | ✅ เขียนแล้ว + review/แก้แล้ว | `docs/plans/2026-10-30-phase3-p3b.md` (B1–B5) |
-| P3c (BCCD relabel 204 ภาพ) | ✅ แผนเขียนแล้ว + review/แก้แล้ว | `docs/plans/2026-10-30-phase3-p3c.md` (C1–C3; C3 ต้องรอ P3b B4/B5); audit: label RBC ขาดทุกภาพ (12/12) |
+| P3b (TXL-PBC LOSO 75 runs) | ✅ โค้ด B1–B5 + final review เสร็จ (df3c571..37c6ea1) | รอ Mickie: smoke + resume check + stage 1 pooled (README "P3b"); ledger `ledgers/p3b-progress.md` |
+| P3c (BCCD relabel 204 ภาพ) | ✅ โค้ด C1–C3 + final review (c66d3f4..0c2e086); ค้าง 2 จุด (ดู ledger `p3c-progress.md` ท้ายไฟล์) | ก่อนเริ่ม relabel: แก้ --progress clamp + README 3(d) |
 
 ผลแต่ละขั้นฉบับเต็ม: `docs/handoff/results/`
 ledger (ประวัติ task, review, rulings R1–R24): `docs/handoff/ledgers/`
