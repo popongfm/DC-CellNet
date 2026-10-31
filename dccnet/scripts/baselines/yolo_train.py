@@ -48,17 +48,24 @@ def best_epoch_from_results(csv_path: Path) -> int:
 
 
 def best_epoch_from_ckpt(best_pt: Path, results_csv: Path | None = None) -> int:
-    """``epoch`` stored by Ultralytics in best.pt; falls back to results.csv if the key is missing."""
+    """0-based best epoch for a finished Ultralytics run.
+
+    The final best.pt has been through ``strip_optimizer``, which sets ``epoch = -1``, so a value >= 0 is
+    used as-is but -1 (the expected case) falls back silently to results.csv: first max of mAP50-95(B)
+    (detection fitness is mAP50-95 only and best.pt is written on the first maximum). A missing key
+    also falls back, with a warning. Raises ValueError if the fallback is needed but unusable.
+    """
     import torch
 
     ckpt = torch.load(best_pt, map_location="cpu", weights_only=False)
     ep = ckpt.get("epoch") if isinstance(ckpt, dict) else None
-    if ep is not None:
-        return int(ep)
-    if results_csv is None:
-        raise ValueError(f"'epoch' missing in {best_pt} and no results.csv given")
-    log.warning("'epoch' missing in %s; falling back to results.csv", best_pt)
-    return best_epoch_from_results(results_csv)
+    if isinstance(ep, int) and not isinstance(ep, bool) and ep >= 0:
+        return ep
+    if ep is None:
+        log.warning("'epoch' missing in %s; falling back to results.csv", best_pt)
+    if results_csv is None or not Path(results_csv).exists():
+        raise ValueError(f"best epoch not stored in {best_pt} (epoch={ep!r}) and no results.csv available")
+    return best_epoch_from_results(Path(results_csv))
 
 
 def write_summary(run_dir: Path, best_epoch: int, epochs_run: int, train_seconds: float, n_params: int) -> Path:

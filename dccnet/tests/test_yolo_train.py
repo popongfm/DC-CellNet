@@ -85,3 +85,24 @@ def test_yolo_train_imports_without_ultralytics():
     with pytest.raises(SystemExit) as e:
         mod.main(["--help"])
     assert e.value.code == 0
+
+
+def test_best_epoch_from_ckpt_stripped_minus_one(tmp_path, caplog):
+    mod = _load_module()
+    csv = tmp_path / "results.csv"
+    csv.write_text("epoch,metrics/mAP50-95(B)\n0,0.1\n1,0.5\n2,0.5\n")
+    pt = tmp_path / "best.pt"
+    torch.save({"epoch": -1}, pt)
+    with caplog.at_level(logging.WARNING):
+        assert mod.best_epoch_from_ckpt(pt, csv) == 1
+    assert caplog.text == ""
+
+
+def test_best_epoch_from_ckpt_minus_one_without_csv_raises(tmp_path):
+    mod = _load_module()
+    pt = tmp_path / "best.pt"
+    torch.save({"epoch": -1}, pt)
+    with pytest.raises(ValueError):
+        mod.best_epoch_from_ckpt(pt)
+    with pytest.raises(ValueError):
+        mod.best_epoch_from_ckpt(pt, tmp_path / "nope.csv")
