@@ -467,6 +467,10 @@ def render(res: dict) -> str:
     return "\n".join(L)
 
 
+def _na(x) -> str:
+    return "n/a" if x is None else str(x)
+
+
 def _render_extra(res: dict) -> list[str]:
     ex, cand = res["extra"], res["candidate"]
     L = ["## 5. Extra evaluation splits (BCCD overlap, original vs relabelled)", "",
@@ -493,8 +497,8 @@ def _render_extra(res: dict) -> list[str]:
         L.append("")
     st = ex["import_stats"]
     if st:
-        L += [f"Relabel import (`bccd_relabel/import_stats.json`): yolo_origin_kept = {st['yolo_origin_kept']} "
-              f"(pre-label boxes that survived Mickie's review), n_prelabel_added = {st['n_prelabel_added']}.", ""]
+        L += [f"Relabel import (`bccd_relabel/import_stats.json`): yolo_origin_kept = {_na(st['yolo_origin_kept'])} "
+              f"(pre-label boxes that survived Mickie's review), n_prelabel_added = {_na(st['n_prelabel_added'])}.", ""]
     else:
         L += ["`bccd_relabel/import_stats.json` not found: yolo_origin_kept n/a.", ""]
     return L

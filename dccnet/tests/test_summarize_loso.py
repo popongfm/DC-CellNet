@@ -491,3 +491,13 @@ def test_summarize_extra_cli(xworld):
     assert r.returncode == 0, r.stderr
     assert "label bias" in xworld["out"].read_text().lower()
     assert json.loads(xworld["out"].with_suffix(".json").read_text())["extra"]["splits"] == [V1, V2]
+
+
+def test_summarize_extra_null_import_totals_print_na(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled")
+    d = xworld["data_root"] / "bccd_relabel"
+    d.mkdir()
+    (d / "import_stats.json").write_text(json.dumps({"totals": {"yolo_origin_kept": None, "n_prelabel_added": None}}))
+    md = summarize_loso.render(_summ(xworld, splits=("pooled",), extra=(V1, V2)))
+    assert "None" not in md and "yolo_origin_kept = n/a" in md

@@ -362,3 +362,29 @@ def test_recheck_sample_and_agreement(tmp_path):
     r4 = _import(root, "--recheck")
     assert r4.returncode != 0 and "BloodImage_00000" in r4.stderr
     assert (out / "import_stats.json").read_text() == before
+
+
+def test_recheck_uses_sample_only_and_reports_missing(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    assert _import(root).returncode == 0
+    assert _import(root, "--sample-recheck", "1", "--seed", "0").returncode == 0
+    imgs, labs = _recheck_dirs(out)
+    stem = Path(next(imgs.iterdir())).stem
+    assert json.loads((out / "recheck" / "sample.json").read_text())["stems"] == [stem]
+    (labs / "classes.txt").write_text("RBC\n")  # stray txt files and non-sampled stems are ignored
+    other = "BloodImage_00000" if stem == "BloodImage_00001" else "BloodImage_00001"
+    (labs / f"{other}.txt").write_text("garbage\n")
+    # sampled label file missing -> error, nothing written
+    (labs / f"{stem}.txt").unlink()
+    r = _import(root, "--recheck")
+    assert r.returncode != 0 and stem in r.stderr and "missing" in r.stderr
+    assert "recheck" not in json.loads((out / "import_stats.json").read_text())
+    import shutil
+    shutil.copy(out / "labels" / f"{stem}.txt", labs / f"{stem}.txt")
+    r = _import(root, "--recheck")
+    assert r.returncode == 0, r.stderr
+    assert json.loads((out / "import_stats.json").read_text())["recheck"]["n_images"] == 1
+    # a normal import afterwards keeps the recheck result
+    assert _import(root).returncode == 0
+    assert json.loads((out / "import_stats.json").read_text())["recheck"]["n_images"] == 1

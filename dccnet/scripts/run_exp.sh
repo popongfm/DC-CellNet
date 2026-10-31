@@ -15,7 +15,7 @@
 #   EXP_EXTRA_SPLITS (unset; extra eval splits, e.g. "overlap_bccd bccd_overlap_v2")
 #   EXP_DEVICE (unset; --device for dccnet and frcnn scripts only, Ultralytics keeps its default 0)
 #   EXP_TRAIN_ARGS (unset; appended to every train command, e.g. "--epochs-max 1")  EXP_PREDICT_ARGS (unset)
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 
 PY="${EXP_PYTHON:-python}"

@@ -203,3 +203,12 @@ def test_runner_extra_after_normal_stage_and_missing_extra_split(tmp_path):
     assert kinds == ["train.py", "predict.py", "evaluate.py:sweep", "predict.py", "evaluate.py", "predict.py",
                      "evaluate.py"]
     assert "--score-thr 0.4 --map-ci-n 0" in _calls(tmp_path)[-1]
+
+
+@pytest.mark.parametrize("script", ["predict.py", "yolo_predict.py", "frcnn_predict.py"])
+def test_runner_predict_failure_is_logged(tmp_path, script):
+    env = _setup(tmp_path)
+    arm = {"predict.py": "d_both", "yolo_predict.py": "yolo26m", "frcnn_predict.py": "frcnn"}[script]
+    r = _run(env, EXP_ARMS=arm, EXP_SEEDS="0", STUB_FAIL_ON=script)
+    assert r.returncode != 0
+    assert "FAILED" in (tmp_path / "runs" / "exp_runner.log").read_text()

@@ -341,5 +341,7 @@ ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26
 
         python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3c.md --splits pooled,loso_BCCD --extra overlap_bccd,bccd_overlap_v2
 
+   With `--splits pooled,loso_BCCD` only section 5 is meaningful for P3c: the main C2 / LOSO sections stay blank or INCONCLUSIVE until all four folds exist.
+
    Section 5 of the report has, per extra split and training split, the per-arm table, the `d_both`-vs-arm paired comparisons, and a label-bias table (mAP50-95 and RBC MAE on v1 vs v2 and v2 minus v1, plus the `yolo_origin_kept` / `n_prelabel_added` totals from `import_stats.json`).
 7. Optional label-noise check: re-label 20 random v2 images from scratch. `python scripts\import_bccd_relabel.py --data-root data --sample-recheck 20 --seed 0` copies them to `data\bccd_relabel\recheck\images` with empty label files in `recheck\labels` (it refuses if `recheck\labels` exists; it never overwrites). Label them in X-AnyLabeling without looking at v2 (same rule as step 3), save as YOLO, then `python scripts\import_bccd_relabel.py --data-root data --recheck` prints the per-class F1 at IoU 0.5 between the two passes and stores it under `recheck` in `data\bccd_relabel\import_stats.json`.

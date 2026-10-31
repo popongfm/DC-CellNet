@@ -12,7 +12,7 @@ Label-noise recheck (P3c step 7):
 --sample-recheck N [--seed S]: copy N deterministic random images (numpy default_rng(S).choice without replacement over
 the sorted stems) to <relabel-dir>/recheck/images/ with EMPTY label files in recheck/labels/ and classes.txt; refuses when
 recheck/labels/ exists (never overwrites).
---recheck: compare the re-labelled recheck/labels/*.txt with the v2 split boxes (--out) of the same images, print the
+--recheck: compare the re-labelled recheck/labels/<stem>.txt of the sampled stems (recheck/sample.json) with the v2 split boxes (--out) of the same images, print the
 per-class F1@IoU0.5 and store it under "recheck" in import_stats.json (other keys are kept).
 """
 from __future__ import annotations
@@ -59,6 +59,8 @@ def _sample_recheck(samples, rdir: Path, n: int, seed: int) -> int:
         name = by_stem[st].image_path.name
         shutil.copyfile(rdir / "images" / name, rdir / "recheck" / "images" / name)
         (labels_dir / f"{st}.txt").write_text("", encoding="utf-8", newline="\n")
+    (rdir / "recheck" / "sample.json").write_text(json.dumps({"seed": seed, "n": n, "stems": stems}, indent=1),
+                                                  encoding="utf-8", newline="\n")
     (rdir / "recheck" / "classes.txt").write_text("RBC\nWBC\nPlatelets\n", encoding="utf-8", newline="\n")
     print(f"{n} images -> {rdir / 'recheck'} (seed {seed}); re-label them from scratch in X-AnyLabeling "
           f"(Rule: every RBC whose visible outline is more than half the cell), then run --recheck")
@@ -67,16 +69,20 @@ def _sample_recheck(samples, rdir: Path, n: int, seed: int) -> int:
 
 def _recheck(root: Path, rdir: Path, out: str, subset: str) -> int:
     labels_dir = rdir / "recheck" / "labels"
-    files = sorted(labels_dir.glob("*.txt")) if labels_dir.is_dir() else []
-    if not files:
-        print(f"error: no recheck label files in {labels_dir}; run --sample-recheck first", file=sys.stderr)
+    sample = rdir / "recheck" / "sample.json"
+    if not sample.is_file():
+        print(f"error: {sample} not found; run --sample-recheck first", file=sys.stderr)
         return 1
+    files = [labels_dir / f"{st}.txt" for st in json.loads(sample.read_text(encoding="utf-8"))["stems"]]
     if not (root / out).is_file():
         print(f"error: {root / out} not found; run the import first", file=sys.stderr)
         return 1
     v2 = {Path(s.image_path).stem: s for s in read_split(root / out, root)[subset]}
     errors, pairs = [], []
     for p in files:
+        if not p.is_file():
+            errors.append(f"{p}: missing label file")
+            continue
         s = v2.get(p.stem)
         if s is None:
             errors.append(f"{p}: image {p.stem!r} is not in {out}")
@@ -196,8 +202,11 @@ def main(argv=None) -> int:
         print("warning: manifest lacks 'added_boxes' (old export); yolo_origin_kept is null for those images",
               file=sys.stderr)
     write_split({a.subset: new_samples}, root / a.out, root)
-    (rdir / "import_stats.json").write_text(
-        json.dumps({"totals": tot, "per_image": per_image}, indent=1), encoding="utf-8", newline="\n")
+    old = rdir / "import_stats.json"
+    prev = json.loads(old.read_text(encoding="utf-8")) if old.is_file() else {}
+    keep = {"recheck": prev["recheck"]} if "recheck" in prev else {}  # a normal import keeps the recheck result
+    old.write_text(
+        json.dumps({"totals": tot, "per_image": per_image, **keep}, indent=1), encoding="utf-8", newline="\n")
     print(f"{len(new_samples)} images -> {root / a.out}  " + "  ".join(f"{k}={v}" for k, v in tot.items()))
     return 0
 
