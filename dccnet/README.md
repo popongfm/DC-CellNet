@@ -259,3 +259,56 @@ Compare (one report per arm; `d_both` is the candidate, the arm is the baseline 
     python scripts/compare_runs.py --runs-dir runs --prefix exp_m2_ --split splits/synthetic.json --data-root data --out reports/p3a_div8.md --baseline p3a_div8 --candidate d_both --ablation p3a_div8 --seeds 0
 
 Duration: 14 stride-2 runs (12 + 2) x at most 120 epochs, about 24-28 h on the 5060 Ti.
+
+## P3b — TXL-PBC pooled + LOSO (run on Windows)
+
+Five arms (`d_both`, `d_sigma`, `circlenet`, `yolo26m`, `frcnn`) x five splits (`pooled`, `loso_BCCD`, `loso_BCDD`, `loso_PBC`, `loso_Raabin`) x seeds 0 1 2, all driven by one runner, `scripts\run_exp.bat`. Run dirs are `runs\p3b_<split>_<arm>_s<seed>`; the log is `runs\exp_runner.log`. The runner is resumable (re-run the same command after any stop), skips finished runs (`summary_test.json`), renames a killed run (weights present, no `summary.json`) to `..._aborted_<random>` and retrains it, and stops at the first failure. It never regenerates data or splits: `data\splits\<split>.json` must already exist (made by `prepare_data.py`), otherwise it logs the missing file and fails.
+
+Setup (once, in the dccnet conda env, from `C:\Research\dccnet`):
+
+    git pull dccnet dccnet
+    pip install ultralytics
+    pip show ultralytics
+
+`pip install ultralytics` takes whatever version pip resolves today; copy the `Version:` line of `pip show ultralytics` into your notes / the chat so the report can state it. The YOLO arm exports the split to `data\yolo_p3b_<split>\` (labels taken from the split JSON in our class order 0 RBC, 1 WBC, 2 Platelets); it never touches `data\yolo_pooled\`.
+
+Smoke test (all 5 arms, pooled, seed 0, 1 epoch each; a few minutes, separate runs dir):
+
+    set EXP_SEEDS=0
+    set EXP_TRAIN_ARGS=--epochs-max 1
+    set EXP_RUNS_DIR=runs_smoke_p3b
+    scripts\run_exp.bat
+
+Then one extra DC-CellNet run to exercise AMP plus gradient accumulation on CUDA (batch 4 x accum 2, own runs dir):
+
+    set EXP_ARMS=d_both
+    set EXP_SEEDS=0
+    set EXP_TRAIN_ARGS=--epochs-max 1 --batch 4 --accum-steps 2
+    set EXP_RUNS_DIR=runs_smoke_p3b_accum
+    scripts\run_exp.bat
+
+Check that every `runs_smoke_p3b\p3b_pooled_*_s0` has `summary_test.json`, and tell Claude if anything failed. Reset the variables before the real run (`set EXP_ARMS=`, `set EXP_SEEDS=`, `set EXP_TRAIN_ARGS=`, `set EXP_RUNS_DIR=`).
+
+Out of memory: never shrink the effective batch. Use `set EXP_TRAIN_ARGS=--batch 4 --accum-steps 2` for the DC-CellNet arms and FRCNN (YOLO keeps its effective batch through Ultralytics `nbs`, so only `--batch 4` applies to it); run the arm families separately via `EXP_ARMS` if the flags must differ.
+
+Real run, stage 1: pooled split, 5 arms x 3 seeds = 15 runs:
+
+    set EXP_SPLITS=pooled
+    scripts\run_exp.bat
+
+Then summarise and apply the stop/go rule (spec section 3.2: `d_both` vs `circlenet` on pooled; continue to stage 2 only on GO):
+
+    python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3b_stage1.md --splits pooled
+
+Stage 2: the four leave-one-source-out folds (60 more runs):
+
+    set EXP_SPLITS=loso_BCCD loso_BCDD loso_PBC loso_Raabin
+    scripts\run_exp.bat
+
+    python scripts/summarize_loso.py --runs-dir runs --prefix p3b --data-root data --out reports/p3b.md
+
+Send the results back (Git Bash or WSL, from `dccnet`):
+
+    tar czf runs_p3b.tgz data/splits/pooled.json data/splits/loso_*.json runs/p3b_*/{summary.json,summary_test.json,sweep_val.json,preds_test.json,metrics.jsonl} reports/p3b*.md
+
+ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26m roughly 1-1.5 h, Faster R-CNN roughly 2-3 h; stage 1 is about 25-35 h, stage 2 about 4x that. The estimate is rough; the smoke run's per-epoch times give the real figure.
