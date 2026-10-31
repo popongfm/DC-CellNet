@@ -118,6 +118,15 @@ def compare_label_sets(old_boxes, old_labels, new_boxes, new_labels, iou: float 
     return {"kept": kept, "added": int(len(nb) - kept), "removed": int(len(ob) - kept)}
 
 
+def labels_unedited(old_boxes, old_labels, new_boxes, new_labels, iou: float = 0.98) -> bool:
+    """True iff both sets have the same size and a one-to-one same-class matching with every pair IoU >= ``iou``
+    (tolerates float re-formatting and line order, not a moved box, a class change or an added/removed box)."""
+    n_old, n_new = len(np.asarray(old_labels).reshape(-1)), len(np.asarray(new_labels).reshape(-1))
+    if n_old != n_new:
+        return False
+    return compare_label_sets(old_boxes, old_labels, new_boxes, new_labels, iou)["kept"] == n_old
+
+
 def label_hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 

@@ -388,3 +388,164 @@ def test_recheck_uses_sample_only_and_reports_missing(tmp_path):
     # a normal import afterwards keeps the recheck result
     assert _import(root).returncode == 0
     assert json.loads((out / "import_stats.json").read_text())["recheck"]["n_images"] == 1
+
+
+# ---- final-review fixes: value-based progress, --force backup, recheck guards, BOM, by_origin ----
+def _write_lines(p, lines, nl="\n"):
+    p.write_bytes((nl.join(lines) + nl).encode())
+
+
+def _reformat(line, fmt):
+    c, *v = line.split()
+    return " ".join([c] + [fmt(float(x)) for x in v])
+
+
+def test_progress_value_based_ignores_xanylabeling_reformat(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    p1 = out / "labels" / "BloodImage_00001.txt"
+    lines = p1.read_text().splitlines()
+    # unformatted floats (0.206250 -> 0.20625), tiny float noise, reordered lines, CRLF, blank lines, BOM
+    noisy = [_reformat(ln, lambda x: repr(x + 1e-12)) for ln in reversed(lines)]
+    _write_lines(p1, [""] + noisy[:2] + [""] + noisy[2:], nl="\r\n")
+    assert _edited(root) == "0/2"
+    p1.write_bytes(b"\xef\xbb\xbf" + "\n".join(lines).encode())  # BOM-prefixed (Notepad)
+    assert _edited(root) == "0/2"
+    p1.write_text("\n".join(_reformat(ln, lambda x: f"{x:g}") for ln in lines) + "\n")
+    assert _edited(root) == "0/2"
+
+
+def test_progress_detects_real_edits(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    p1 = out / "labels" / "BloodImage_00001.txt"
+    lines = p1.read_text().splitlines()
+    c, cx, cy, w, h = lines[0].split()
+    moved = f"{c} {float(cx) + 5 / 640:.6f} {cy} {w} {h}"  # 5 px right
+    p1.write_text("\n".join([moved] + lines[1:]) + "\n")
+    assert _edited(root) == "1/2"
+    p1.write_text("\n".join([f"{(int(c) + 1) % 3}" + lines[0][1:]] + lines[1:]) + "\n")  # class change
+    assert _edited(root) == "1/2"
+    p1.write_text("\n".join(lines + ["0 0.9 0.9 0.05 0.05"]) + "\n")  # added box
+    assert _edited(root) == "1/2"
+    p1.write_text("\n".join(lines[:-1]) + "\n")  # removed box
+    assert _edited(root) == "1/2"
+    p1.write_text("\n".join(lines) + "\n")
+    assert _edited(root) == "0/2"
+
+
+def test_progress_unparseable_is_edited_and_listed(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    (out / "labels" / "BloodImage_00000.txt").write_text("garbage\n")
+    r = _import(root, "--progress")
+    assert r.returncode == 0 and "1/2 label files edited" in r.stdout
+    assert "BloodImage_00000" in r.stdout and "unparseable" in r.stdout
+
+
+def test_progress_old_manifest_falls_back_to_hash(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    mp = out / "prelabel_manifest.json"
+    man = json.loads(mp.read_text())
+    for m in man.values():
+        del m["boxes"]
+    mp.write_text(json.dumps(man))
+    r = _import(root, "--progress")
+    assert "0/2 label files edited" in r.stdout and "boxes" in r.stderr and "hash" in r.stderr
+    p1 = out / "labels" / "BloodImage_00001.txt"
+    p1.write_text(p1.read_text().replace("0.", "0.9", 1))
+    assert "1/2" in _import(root, "--progress").stdout
+
+
+def test_manifest_stores_boxes_in_pixels(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    man = json.loads((out / "prelabel_manifest.json").read_text())
+    bx = man["BloodImage_00000"]["boxes"]
+    assert len(bx) == 2 and len(bx[0]) == 5
+    assert bx[0] == pytest.approx([10, 10, 50, 50, 0]) and bx[1] == pytest.approx([200, 200, 240, 240, 0])
+
+
+def test_force_keeps_backup_of_old_work(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    (out / "labels" / "BloodImage_00000.txt").write_text("edited\n")
+    (out / "review_list.csv").write_text("my notes\n")
+    r = _run(root, tmp_path, "--force")
+    assert r.returncode == 0, r.stderr
+    baks = sorted(p.name for p in out.glob("*_backup_*"))
+    assert len(baks) == 3 and any(b.startswith("labels_backup_") for b in baks)
+    lb = next(out.glob("labels_backup_*"))
+    assert (lb / "BloodImage_00000.txt").read_text() == "edited\n"
+    assert next(out.glob("review_list_backup_*.csv")).read_text() == "my notes\n"
+    assert next(out.glob("prelabel_manifest_backup_*.json")).is_file()
+    assert "labels_backup_" in r.stdout
+    assert (out / "labels" / "BloodImage_00000.txt").read_text() != "edited\n"
+    assert "my notes" not in (out / "review_list.csv").read_text()
+
+
+def test_recheck_refuses_when_all_empty(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    assert _import(root).returncode == 0
+    assert _import(root, "--sample-recheck", "2", "--seed", "0").returncode == 0
+    before = (out / "import_stats.json").read_text()
+    r = _import(root, "--recheck")
+    assert r.returncode == 1 and "empty" in r.stderr
+    assert (out / "import_stats.json").read_text() == before
+
+
+def test_bom_label_files_in_import_and_recheck(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    for p in (out / "labels").glob("*.txt"):
+        p.write_bytes(b"\xef\xbb\xbf" + p.read_bytes())
+    assert _import(root).returncode == 0
+    assert _import(root, "--sample-recheck", "2", "--seed", "0").returncode == 0
+    _, labs = _recheck_dirs(out)
+    for p in (out / "labels").glob("*.txt"):
+        (labs / p.name).write_bytes(p.read_bytes())  # still BOM-prefixed
+    r = _import(root, "--recheck")
+    assert r.returncode == 0, r.stderr
+    assert json.loads((out / "import_stats.json").read_text())["recheck"]["f1_iou50"]["RBC"] == 1.0
+
+
+def test_recheck_by_origin_and_stale_flag(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    assert _import(root).returncode == 0
+    assert _import(root, "--sample-recheck", "2", "--seed", "0").returncode == 0
+    _, labs = _recheck_dirs(out)
+    for p in (out / "labels").glob("*.txt"):
+        (labs / p.name).write_bytes(p.read_bytes())
+    # image 0: GT [10..50] + YOLO [200..240]; image 1: 2 GT + 2 YOLO. Drop one YOLO box of image 1 (the last line).
+    lines = (labs / "BloodImage_00001.txt").read_text().splitlines()
+    (labs / "BloodImage_00001.txt").write_text("\n".join(lines[:-1]) + "\n")
+    assert _import(root, "--recheck").returncode == 0
+    st = json.loads((out / "import_stats.json").read_text())
+    assert st["recheck"]["by_origin"] == {"yolo": {"n": 3, "matched": 2}, "gt": {"n": 3, "matched": 3}}
+    assert "recheck_stale" not in st
+    # re-importing v2 afterwards keeps the recheck block but marks it stale; a new --recheck clears the flag
+    assert _import(root).returncode == 0
+    st = json.loads((out / "import_stats.json").read_text())
+    assert st["recheck_stale"] is True and "recheck" in st
+    assert _import(root, "--recheck").returncode == 0
+    assert "recheck_stale" not in json.loads((out / "import_stats.json").read_text())
+
+
+def test_recheck_by_origin_null_without_added_boxes(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    assert _import(root).returncode == 0
+    assert _import(root, "--sample-recheck", "2", "--seed", "0").returncode == 0
+    _, labs = _recheck_dirs(out)
+    for p in (out / "labels").glob("*.txt"):
+        (labs / p.name).write_bytes(p.read_bytes())
+    mp = out / "prelabel_manifest.json"
+    man = json.loads(mp.read_text())
+    for m in man.values():
+        del m["added_boxes"]
+    mp.write_text(json.dumps(man))
+    assert _import(root, "--recheck").returncode == 0
+    assert json.loads((out / "import_stats.json").read_text())["recheck"]["by_origin"] is None

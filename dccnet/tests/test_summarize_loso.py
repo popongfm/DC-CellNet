@@ -397,10 +397,11 @@ def _fill_extra(w, split, arms=ARMS, seeds=SEEDS):
                     "counting": {"MAE": {"RBC": mae, "WBC": 0.0, "Platelets": 0.0}}}))
 
 
-def _import_stats(w, kept=17, added=25):
+def _import_stats(w, kept=17, added=25, **more):
     d = w["data_root"] / "bccd_relabel"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "import_stats.json").write_text(json.dumps({"totals": {"yolo_origin_kept": kept, "n_prelabel_added": added}}))
+    (d / "import_stats.json").write_text(json.dumps(
+        {"totals": {"yolo_origin_kept": kept, "n_prelabel_added": added}, **more}))
 
 
 def test_summarize_extra_section(xworld):
@@ -427,6 +428,25 @@ def test_summarize_extra_section(xworld):
     assert "label bias" in md.lower() and "yolo_origin_kept" in md and "17" in md
     assert V1 in md and V2 in md and "-0.1000" in md
     assert not res["warnings"]
+    # change relative to the candidate's own v1 -> v2 change
+    assert b["d_both"]["map_delta_vs_cand"] == pytest.approx(0.0) and b["d_both"]["mae_delta_vs_cand"] == pytest.approx(0.0)
+    assert b["circlenet"]["map_delta_vs_cand"] == pytest.approx(-0.05 - -0.1)
+    assert "Δ − Δ(candidate)" in md and "anchoring" in md and "IoU ≥ 0.5" in md
+    assert "recheck" not in md.lower().replace("recheck_stale", "")
+
+
+def test_summarize_extra_renders_recheck_and_stale(xworld):
+    _fill(xworld, splits=("pooled",))
+    _fill_extra(xworld, "pooled")
+    _import_stats(xworld, recheck={"n_images": 20, "f1_iou50": {"RBC": 0.9, "WBC": None, "Platelets": 0.5},
+                                   "by_origin": {"yolo": {"n": 10, "matched": 7}, "gt": {"n": 20, "matched": 19}}},
+                  recheck_stale=True)
+    res = _summ(xworld, splits=("pooled",), extra=(V1, V2))
+    st = res["extra"]["import_stats"]
+    assert st["recheck_f1"]["RBC"] == 0.9 and st["recheck_stale"] is True
+    md = summarize_loso.render(res)
+    assert "RBC=0.9000" in md and "WBC=n/a" in md and "Platelets=0.5000" in md
+    assert "recheck_stale" in md and "yolo 7/10" in md and "gt 19/20" in md
 
 
 def test_summarize_extra_absent_without_flag(xworld):

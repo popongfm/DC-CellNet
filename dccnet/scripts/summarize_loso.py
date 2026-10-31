@@ -348,10 +348,20 @@ def _extra(runs_dir, prefix, data_root, splits, arms, candidate, seeds, map_ci_n
                 bias[ts][arm] = {"map_v1": m1, "map_v2": m2, "mae_v1": e1, "mae_v2": e2,
                                  "map_delta": None if m1 is None or m2 is None else m2 - m1,
                                  "mae_delta": None if e1 is None or e2 is None else e2 - e1}
+            cb = bias[ts].get(candidate)
+            for b in bias[ts].values():  # change relative to the candidate's own v1 -> v2 change
+                for k in ("map", "mae"):
+                    d, dc = b[f"{k}_delta"], None if cb is None else cb[f"{k}_delta"]
+                    b[f"{k}_delta_vs_cand"] = None if d is None or dc is None else d - dc
     stats = _read_json(Path(data_root) / "bccd_relabel" / "import_stats.json")
     totals = (stats or {}).get("totals") or {}
-    return {"splits": extra, "train_splits": train_splits, "blocks": blocks, "bias": bias,
-            "import_stats": {k: totals.get(k) for k in ("yolo_origin_kept", "n_prelabel_added")} if stats else None}
+    ist = {k: totals.get(k) for k in ("yolo_origin_kept", "n_prelabel_added")} if stats else None
+    if stats and stats.get("recheck"):
+        rc = stats["recheck"]
+        ist["recheck_f1"] = rc.get("f1_iou50")
+        ist["recheck_stale"] = bool(rc.get("recheck_stale") or stats.get("recheck_stale"))
+        ist["recheck_by_origin"] = rc.get("by_origin")
+    return {"splits": extra, "train_splits": train_splits, "blocks": blocks, "bias": bias, "import_stats": ist}
 
 
 # ---------------------------------------------------------------------------------------------------- rendering
@@ -490,15 +500,30 @@ def _render_extra(res: dict) -> list[str]:
         L += [f"No training split has both `{V1}` and `{V2}` results.", ""]
     for ts, arms in ex["bias"].items():
         L += [f"Trained on {ts}; v1 = `{V1}`, v2 = `{V2}`; delta = v2 − v1.", "",
-              "| arm | mAP50-95 v1 | mAP50-95 v2 | Δ mAP50-95 | RBC MAE v1 | RBC MAE v2 | Δ RBC MAE |", "|---|---|---|---|---|---|---|"]
+              "| arm | mAP50-95 v1 | mAP50-95 v2 | Δ mAP50-95 | Δ − Δ(candidate) mAP50-95 | RBC MAE v1 | RBC MAE v2 | "
+              "Δ RBC MAE | Δ − Δ(candidate) RBC MAE |", "|---|---|---|---|---|---|---|---|---|"]
         for arm, b in arms.items():
             L.append(f"| {arm} | {_blank(b['map_v1'])} | {_blank(b['map_v2'])} | {_blank(b['map_delta'])} | "
-                     f"{_blank(b['mae_v1'])} | {_blank(b['mae_v2'])} | {_blank(b['mae_delta'])} |")
+                     f"{_blank(b.get('map_delta_vs_cand'))} | {_blank(b['mae_v1'])} | {_blank(b['mae_v2'])} | "
+                     f"{_blank(b['mae_delta'])} | {_blank(b.get('mae_delta_vs_cand'))} |")
         L.append("")
+    if ex["bias"]:
+        L += ["Reading guide: if yolo26m gains more than the other arms from v1 → v2, part of that gain may come from "
+              "the YOLO pre-label (anchoring); yolo_origin_kept counts pre-label boxes kept at IoU ≥ 0.5.", ""]
     st = ex["import_stats"]
     if st:
         L += [f"Relabel import (`bccd_relabel/import_stats.json`): yolo_origin_kept = {_na(st['yolo_origin_kept'])} "
               f"(pre-label boxes that survived Mickie's review), n_prelabel_added = {_na(st['n_prelabel_added'])}.", ""]
+        if "recheck_f1" in st:
+            f1 = "  ".join(f"{k}={'n/a' if v is None else format(v, '.4f')}" for k, v in (st["recheck_f1"] or {}).items())
+            L += [f"Label-noise recheck (second pass vs v2, F1@IoU0.5): {f1}.", ""]
+            bo = st.get("recheck_by_origin")
+            if bo:
+                L += ["Recheck match rate by v2 box origin (same-class IoU ≥ 0.5): "
+                      + "; ".join(f"{o} {v['matched']}/{v['n']}" for o, v in bo.items()) + ".", ""]
+            if st["recheck_stale"]:
+                L += ["WARNING: recheck_stale — v2 was re-imported after the recheck; the recheck numbers may not "
+                      "match the current v2 boxes.", ""]
     else:
         L += ["`bccd_relabel/import_stats.json` not found: yolo_origin_kept n/a.", ""]
     return L

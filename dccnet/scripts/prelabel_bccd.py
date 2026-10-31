@@ -5,7 +5,8 @@ Usage (from dccnet/):
         [--split splits/overlap_bccd.json] [--out bccd_relabel] [--conf 0.5] [--force]
 
 Writes <data-root>/<out>/{images/, labels/<stem>.txt, classes.txt, review_list.csv, prelabel_manifest.json}.
-Refuses to touch an existing <out>/labels/ unless --force (it may hold manual corrections).
+Refuses to touch an existing <out>/labels/ unless --force; --force first moves the old labels/, review_list.csv and
+prelabel_manifest.json to <name>_backup_<YYYYmmdd-HHMMSS> inside <out> (nothing is overwritten).
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import csv
 import json
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +65,14 @@ def main(argv=None) -> int:
         print(f"error: {len(unknown)} prediction image keys not in split, e.g. {sorted(unknown)[:3]}", file=sys.stderr)
         return 2
 
+    if (out / "labels").exists():  # only reachable with --force: keep the old work in a timestamped backup
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        for name in ("labels", "review_list.csv", "prelabel_manifest.json"):
+            src = out / name
+            if src.exists():
+                dst = out / f"{Path(name).stem}_backup_{stamp}{Path(name).suffix}"
+                shutil.move(str(src), str(dst))
+                print(f"--force: moved {src} -> {dst}")
     (out / "images").mkdir(parents=True, exist_ok=True)
     (out / "labels").mkdir(parents=True, exist_ok=True)
     manifest, rows = {}, []
@@ -81,7 +91,8 @@ def main(argv=None) -> int:
         shutil.copyfile(s.image_path, out / "images" / Path(s.image_path).name)
         added = [[float(v) for v in b] + [int(c)] for b, c, o in zip(boxes, labels, origin) if o == 1]
         manifest[stem] = {"hash": label_hash(txt), "image": key, "origin": [int(o) for o in origin],
-                          "added_boxes": added}
+                          "added_boxes": added,
+                          "boxes": [[float(v) for v in b] + [int(c)] for b, c in zip(boxes, labels)]}
         rows.append((stem, st))
         for k in tot:
             tot[k] += st[k]
