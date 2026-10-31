@@ -121,3 +121,48 @@ def test_p3a_configs_differ_from_d_both_only_in_their_keys(name, expected):
     assert cand[("model", "out_stride")] == 2 == cand[("data", "stride")]
     assert cand[("model", "heads", "density")] is False and cand[("loss", "cc", "enabled")] is False
     assert (cand[("train", "epochs_max")], cand[("train", "patience")]) == (120, 20)
+
+
+# ---- P3b: TXL-PBC pooled / LOSO DC-CellNet arms ----
+
+P3B_ARMS = {  # name -> (data.stride, model.out_stride, data.heatmap_sigma)
+    "p3b_d_both.yaml": (2, 2, "adaptive"),
+    "p3b_d_sigma.yaml": (4, 4, "adaptive"),
+    "p3b_circlenet.yaml": (4, 4, "radius"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(P3B_ARMS))
+def test_p3b_configs(name):
+    from pathlib import Path
+    d = Path(__file__).resolve().parents[1] / "configs"
+    raw = yaml.safe_load((d / name).read_text())
+    assert raw["_base_"] == "base.yaml"
+    cfg = load_config(d / name)
+    t = cfg["train"]
+    assert (t["epochs_max"], t["patience"], t["select_from_epoch"], t["batch"], t["amp"]) == (150, 30, 0, 8, True)
+    assert t["accum_steps"] == 1
+    assert cfg["model"]["heads"]["density"] is False
+    assert cfg["loss"]["cc"]["enabled"] is False
+    assert cfg["model"]["pretrained"] is True
+    stride, out_stride, sigma = P3B_ARMS[name]
+    assert (cfg["data"]["stride"], cfg["model"]["out_stride"], cfg["data"]["heatmap_sigma"]) == (stride, out_stride, sigma)
+    assert cfg["data"]["heatmap_divisor"] == 4 and cfg["data"]["heatmap_shape"] == "gaussian"
+    assert cfg["data"]["split"] == "splits/pooled.json"
+    # augmentation unchanged from base.yaml
+    assert cfg["aug"] == load_config(d / "base.yaml")["aug"]
+
+
+def test_p3b_d_both_matches_m2_d_both_model_and_targets():
+    from pathlib import Path
+    d = Path(__file__).resolve().parents[1] / "configs"
+    p3b, m2 = load_config(d / "p3b_d_both.yaml"), load_config(d / "exp_m2_d_both.yaml")
+    assert p3b["model"] == m2["model"]
+    assert {k: v for k, v in p3b["data"].items() if k != "split"} == \
+        {k: v for k, v in m2["data"].items() if k != "split"}
+
+
+def test_base_accum_steps_default():
+    from pathlib import Path
+    cfg = load_config(Path(__file__).resolve().parents[1] / "configs" / "base.yaml")
+    assert cfg["train"]["accum_steps"] == 1

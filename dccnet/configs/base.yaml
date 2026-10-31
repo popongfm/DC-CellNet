@@ -36,6 +36,7 @@ train:
   amp: true
   lr: 1.25e-4
   seed: 0
+  accum_steps: 1  # gradient accumulation: optimizer step every k micro-batches (OOM: batch 4 x accum 2)
 aug:
   hflip: true
   vflip: true

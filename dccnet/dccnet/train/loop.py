@@ -1,11 +1,15 @@
 """DC-CellNet training loop: data loaders, train/val epochs, early stopping, run-dir writing.
 
 Run dir (``fit``) contains exactly: ``config.yaml`` (resolved config), ``git_hash.txt``,
-``metrics.jsonl`` (one JSON line per epoch), ``best.pt`` and ``summary.json``.
+``metrics.jsonl`` (one JSON line per epoch), ``best.pt`` and ``summary.json`` (also records
+``train_seconds`` = wall clock of the epoch loop incl. per-epoch validation, and ``n_params`` = total
+model parameter count).
 
 * Epochs are 0-based (``epoch`` is what ``compute_losses`` / the λ_cc schedule receive).
 * Optimizer AdamW(lr=train.lr, weight_decay=1e-4); CosineAnnealingLR(T_max=train.epochs_max),
   stepped once per epoch. AMP (autocast + GradScaler) only on CUDA with ``train.amp``.
+* Gradient accumulation: ``train.accum_steps`` (default 1) micro-batches per optimizer step (see
+  ``train_one_epoch``); the scheduler and early stopping still step once per epoch.
 * A step whose ``loss_total`` is non-finite is skipped (no backward / optimizer step), logged as a
   warning and counted in ``nonfinite_steps``; so is a step the GradScaler skipped (inf/NaN grads,
   seen as a drop in ``scaler.get_scale()``). Epoch loss means are over finite-loss steps. An epoch in
@@ -135,42 +139,68 @@ def build_loaders(cfg: dict, data_root: Path, num_workers: int = 0,
 
 
 def train_one_epoch(model, loader, optimizer, scaler, cfg: dict, device: torch.device, epoch: int) -> dict:
-    """One pass over ``loader``. Returns mean of each loss key over finite steps + ``nonfinite_steps``."""
+    """One pass over ``loader``. Returns mean of each loss key over finite micro-batches + ``nonfinite_steps``.
+
+    Gradient accumulation (``train.accum_steps = k``, default 1): micro-batches are grouped in runs of
+    k (the last group of the epoch may be shorter); each micro-batch loss is divided by its group's true
+    size and one optimizer (scaler) step is taken per group. A non-finite micro-batch loss skips the whole
+    group (no optimizer step; the group's remaining micro-batches are not run) and counts as one
+    non-finite step, as does a group whose step the GradScaler skipped. ``k = 1`` is the plain
+    one-step-per-batch loop.
+    """
     model.train()
     amp = _use_amp(cfg, device)
-    sums = {k: 0.0 for k in LOSS_KEYS}
+    k = int(cfg["train"].get("accum_steps", 1))
+    if k < 1:
+        raise ValueError(f"train.accum_steps must be >= 1, got {k}")
+    n_batches = len(loader)
+    sums = {key: 0.0 for key in LOSS_KEYS}
     n_ok = n_bad = n_steps = 0
+    group_bad = False
     for step, (images, targets, _metas) in enumerate(loader):
+        g_start = (step // k) * k
+        g_size = min(k, n_batches - g_start)
+        g_last = step == g_start + g_size - 1
+        if step == g_start:
+            optimizer.zero_grad(set_to_none=True)
+            group_bad = False
+            n_steps += 1
+        if group_bad:
+            continue
         images = images.to(device, non_blocking=True)
-        targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
-        optimizer.zero_grad(set_to_none=True)
+        targets = {key: v.to(device, non_blocking=True) for key, v in targets.items()}
         with torch.amp.autocast("cuda", enabled=amp):
             outputs = model(images)
         losses = compute_losses(outputs, targets, cfg, epoch)  # outputs are float32
         total = losses["loss_total"]
-        n_steps += 1
         if not torch.isfinite(total):
             n_bad += 1
-            log.warning("epoch %d step %d: non-finite loss_total (%s); optimizer step skipped",
-                        epoch, step, total.item())
+            group_bad = True
+            optimizer.zero_grad(set_to_none=True)
+            log.warning("epoch %d step %d: non-finite loss_total (%s); optimizer step skipped%s",
+                        epoch, step, total.item(), f" (accumulation group of {g_size})" if k > 1 else "")
             continue
-        for k in LOSS_KEYS:
-            sums[k] += float(losses[k].detach().item())
+        for key in LOSS_KEYS:
+            sums[key] += float(losses[key].detach().item())
         n_ok += 1
+        if g_size > 1:
+            total = total / g_size
         if scaler is not None:
-            scale_before = scaler.get_scale()
             scaler.scale(total).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            if scaler.get_scale() < scale_before:  # inf/NaN gradients: GradScaler skipped the step
-                n_bad += 1
-                log.warning("epoch %d step %d: GradScaler skipped the step (non-finite gradients)", epoch, step)
+            if g_last:
+                scale_before = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                if scaler.get_scale() < scale_before:  # inf/NaN gradients: GradScaler skipped the step
+                    n_bad += 1
+                    log.warning("epoch %d step %d: GradScaler skipped the step (non-finite gradients)", epoch, step)
         else:
             total.backward()
-            optimizer.step()
+            if g_last:
+                optimizer.step()
     if n_steps and n_bad >= n_steps:
         raise RuntimeError(f"epoch {epoch}: all {n_steps} steps were non-finite (loss or gradients); aborting")
-    out = {k: (sums[k] / n_ok if n_ok else float("nan")) for k in LOSS_KEYS}
+    out = {key: (sums[key] / n_ok if n_ok else float("nan")) for key in LOSS_KEYS}
     out["nonfinite_steps"] = n_bad
     return out
 
@@ -320,6 +350,8 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
     scaler = torch.amp.GradScaler("cuda") if _use_amp(cfg, device) else None
     stopper = EarlyStopping(patience, start_epoch=sel_from)
     best_val: dict = {}
+    n_params = sum(p.numel() for p in model.parameters())
+    t_train = time.perf_counter()
 
     with open(run_dir / "metrics.jsonl", "w", encoding="utf-8") as mf:
         for epoch in range(epochs_max):
@@ -349,6 +381,7 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
             if stopper.should_stop:
                 print(f"early stop: no val mAP50-95 improvement for {patience} epochs", flush=True)
                 break
+    train_seconds = float(time.perf_counter() - t_train)
 
     summary = {
         "exp": run_dir.name,
@@ -360,6 +393,8 @@ def fit(cfg: dict, run_dir: Path, device: torch.device, data_root: Path, num_wor
         "val": {"mAP50": _json_num(best_val.get("mAP50")), "mAP50_95": _json_num(best_val.get("mAP50_95")),
                 "rbc_count_mae": _json_num(best_val.get("rbc_count_mae"))},
         "test": None,
+        "train_seconds": train_seconds,
+        "n_params": int(n_params),
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary

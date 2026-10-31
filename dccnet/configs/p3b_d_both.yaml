@@ -1,0 +1,20 @@
+# P3b arm d_both: circlenet + adaptive heatmap sigma + stride-2 output, TXL-PBC (pooled / LOSO via --split)
+_base_: base.yaml
+model:
+  pretrained: true
+  out_stride: 2
+  heads:
+    density: false
+loss:
+  cc:
+    enabled: false
+train:
+  epochs_max: 150
+  patience: 30
+  select_from_epoch: 0
+  batch: 8
+  amp: true
+data:
+  split: splits/pooled.json  # relative to --data-root; runner overrides with --split
+  stride: 2
+  heatmap_sigma: adaptive

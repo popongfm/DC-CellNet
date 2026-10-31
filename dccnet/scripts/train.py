@@ -3,13 +3,18 @@
 Usage (from dccnet/):
     python scripts/train.py --config configs/exp.yaml [--seed 0] [--device cuda] [--data-root data]
         [--runs-dir runs] [--run-name NAME] [--epochs-max N] [--num-workers 0]
+        [--split splits/loso_PBC.json] [--batch N] [--accum-steps K]
 
 Run dir = <runs-dir>/<run-name> (default run-name: <config stem>_s<seed>) with config.yaml,
-git_hash.txt, metrics.jsonl, best.pt, summary.json. The split file is <data-root>/<data.split>.
+git_hash.txt, metrics.jsonl, best.pt, summary.json. The split file is <data-root>/<data.split>
+(--split overrides data.split, path relative to --data-root). --batch / --accum-steps override
+train.batch / train.accum_steps (OOM policy: lower --batch and raise --accum-steps to keep the
+effective batch, e.g. --batch 4 --accum-steps 2).
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import random
 import sys
 from pathlib import Path
@@ -29,6 +34,33 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
+    """Return a copy of ``cfg`` with the CLI overrides applied (absent / None attributes are ignored):
+    ``seed`` -> train.seed, ``epochs_max`` -> train.epochs_max, ``split`` -> data.split,
+    ``batch`` -> train.batch, ``accum_steps`` -> train.accum_steps."""
+    cfg = copy.deepcopy(cfg)
+    seed = getattr(args, "seed", None)
+    epochs_max = getattr(args, "epochs_max", None)
+    split = getattr(args, "split", None)
+    batch = getattr(args, "batch", None)
+    accum = getattr(args, "accum_steps", None)
+    if seed is not None:
+        cfg["train"]["seed"] = int(seed)
+    if epochs_max is not None:
+        cfg["train"]["epochs_max"] = int(epochs_max)
+    if split is not None:
+        cfg["data"]["split"] = Path(split).as_posix()
+    if batch is not None:
+        if int(batch) < 1:
+            raise ValueError(f"--batch must be >= 1, got {batch}")
+        cfg["train"]["batch"] = int(batch)
+    if accum is not None:
+        if int(accum) < 1:
+            raise ValueError(f"--accum-steps must be >= 1, got {accum}")
+        cfg["train"]["accum_steps"] = int(accum)
+    return cfg
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, type=Path)
@@ -39,13 +71,12 @@ def main(argv=None) -> int:
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--epochs-max", type=int, default=None, help="overrides train.epochs_max")
     ap.add_argument("--num-workers", type=int, default=0)
+    ap.add_argument("--split", default=None, help="overrides data.split (path relative to --data-root)")
+    ap.add_argument("--batch", type=int, default=None, help="overrides train.batch")
+    ap.add_argument("--accum-steps", type=int, default=None, help="overrides train.accum_steps")
     args = ap.parse_args(argv)
 
-    cfg = load_config(args.config)
-    if args.seed is not None:
-        cfg["train"]["seed"] = args.seed
-    if args.epochs_max is not None:
-        cfg["train"]["epochs_max"] = args.epochs_max
+    cfg = apply_overrides(load_config(args.config), args)
     seed = int(cfg["train"]["seed"])
     seed_everything(seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))

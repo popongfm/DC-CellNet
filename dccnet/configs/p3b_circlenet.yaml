@@ -1,0 +1,17 @@
+# P3b arm circlenet: radius heatmap sigma, stride 4, no density head / L_cc, TXL-PBC (pooled / LOSO via --split)
+_base_: base.yaml
+model:
+  pretrained: true
+  heads:
+    density: false
+loss:
+  cc:
+    enabled: false
+train:
+  epochs_max: 150
+  patience: 30
+  select_from_epoch: 0
+  batch: 8
+  amp: true
+data:
+  split: splits/pooled.json  # relative to --data-root; runner overrides with --split

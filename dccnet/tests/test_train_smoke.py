@@ -1,4 +1,5 @@
 """Smoke tests for the training loop, scripts/train.py and scripts/predict.py (CPU, synthetic data)."""
+import copy
 import json
 import math
 import subprocess
@@ -400,3 +401,145 @@ def test_build_loaders_passes_heatmap_divisor_and_shape(tmp_path):
     cfg["data"]["heatmap_shape"] = "bogus"
     with pytest.raises(ValueError, match="heatmap_shape"):
         build_loaders(cfg, data_root)
+
+
+# ---- P3b: gradient accumulation (train.accum_steps) ----
+# Tiny conv model without batch-norm (so batch 8 vs 2 x 4 has no BN-statistics coupling), AMP off,
+# fixed data; the loss is a per-micro-batch mean MSE (as compute_losses is a per-batch mean).
+
+def _accum_env(monkeypatch, n_img=8, nan_calls=()):
+    import dccnet.train.loop as loop
+
+    calls = {"n": 0}
+
+    def fake_losses(outputs, targets, cfg, epoch):
+        v = ((outputs - targets["t"]) ** 2).mean()
+        if calls["n"] in nan_calls:
+            v = v * float("nan")
+        calls["n"] += 1
+        return {k: v for k in loop.LOSS_KEYS}
+
+    monkeypatch.setattr(loop, "compute_losses", fake_losses)
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(n_img, 3, 6, 6, generator=g)
+    t = torch.randn(n_img, 1, 6, 6, generator=g)
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Conv2d(3, 4, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv2d(4, 1, 1))
+    return loop, model, x, t
+
+
+def _batches(x, t, sizes):
+    out, i = [], 0
+    for s in sizes:
+        out.append((x[i:i + s], {"t": t[i:i + s]}, [{}] * s))
+        i += s
+    return out
+
+
+class _CountingSGD(torch.optim.SGD):
+    def __init__(self, params, lr):
+        super().__init__(params, lr=lr)
+        self.n_steps = 0
+
+    def step(self, closure=None):
+        self.n_steps += 1
+        return super().step(closure)
+
+
+def _run(loop, model, batches, accum, lr=0.1):
+    m = copy.deepcopy(model)
+    opt = _CountingSGD(m.parameters(), lr=lr)
+    out = loop.train_one_epoch(m, batches, opt, None, {"train": {"amp": False, "accum_steps": accum}},
+                               torch.device("cpu"), 0)
+    return m, opt, out
+
+
+def _assert_params_close(a, b, atol=1e-6):
+    for (na, pa), (nb, pb) in zip(a.named_parameters(), b.named_parameters()):
+        assert na == nb
+        assert torch.allclose(pa, pb, atol=atol, rtol=0), (na, (pa - pb).abs().max())
+
+
+def test_accum_equals_full_batch(monkeypatch):
+    loop, model, x, t = _accum_env(monkeypatch)
+    full, opt_full, _ = _run(loop, model, _batches(x, t, [8]), accum=1)
+    acc, opt_acc, out = _run(loop, model, _batches(x, t, [4, 4]), accum=2)
+    assert opt_full.n_steps == 1 and opt_acc.n_steps == 1
+    assert out["nonfinite_steps"] == 0
+    _assert_params_close(full, acc)
+    assert not torch.equal(full[0].weight, model[0].weight)  # a step actually happened
+
+
+def test_accum_partial_last_group_scaled_by_true_size(monkeypatch):
+    loop, model, x, t = _accum_env(monkeypatch, n_img=12)
+    # reference: batch 8 then batch 4, one optimizer step each
+    ref, opt_ref, _ = _run(loop, model, _batches(x, t, [8, 4]), accum=1)
+    # accum 2 over 3 micro-batches of 4: group {0, 1} (/2) then partial group {2} (/1)
+    acc, opt_acc, _ = _run(loop, model, _batches(x, t, [4, 4, 4]), accum=2)
+    assert opt_ref.n_steps == opt_acc.n_steps == 2
+    _assert_params_close(ref, acc)
+
+
+def test_accum_nonfinite_micro_batch_skips_whole_group(monkeypatch, caplog):
+    loop, model, x, t = _accum_env(monkeypatch, n_img=16, nan_calls={1})
+    with caplog.at_level("WARNING", logger="dccnet.train.loop"):
+        acc, opt_acc, out = _run(loop, model, _batches(x, t, [4, 4, 4, 4]), accum=2)
+    assert "non-finite" in caplog.text
+    assert out["nonfinite_steps"] == 1 and opt_acc.n_steps == 1
+    assert math.isfinite(out["loss_total"])
+    # only the second group (images 8..15) was applied
+    loop2, model2, x2, t2 = _accum_env(monkeypatch, n_img=16)
+    ref, _, _ = _run(loop2, model2, _batches(x2[8:], t2[8:], [8]), accum=1)
+    _assert_params_close(ref, acc)
+
+
+def test_accum_all_groups_nonfinite_aborts(monkeypatch):
+    # call 0 (group 0) is NaN -> group 0's second micro-batch is not run; call 1 = group 1's first
+    loop, model, x, t = _accum_env(monkeypatch, n_img=16, nan_calls={0, 1})
+    with pytest.raises(RuntimeError, match="non-finite"):
+        _run(loop, model, _batches(x, t, [4, 4, 4, 4]), accum=2)
+
+
+def test_accum_rejects_nonpositive(monkeypatch):
+    loop, model, x, t = _accum_env(monkeypatch)
+    with pytest.raises(ValueError, match="accum_steps"):
+        _run(loop, model, _batches(x, t, [8]), accum=0)
+
+
+def _reference_loop_pre_accum(model, batches, optimizer, fake_losses):
+    """Verbatim copy of the pre-P3b train_one_epoch inner step (AMP off, scaler None)."""
+    model.train()
+    for images, targets, _ in batches:
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast("cuda", enabled=False):
+            outputs = model(images)
+        total = fake_losses(outputs, targets, None, 0)["loss_total"]
+        if not torch.isfinite(total):
+            continue
+        total.backward()
+        optimizer.step()
+
+
+@pytest.mark.parametrize("accum_cfg", [{"accum_steps": 1}, {}])
+def test_accum_one_is_bit_identical_to_pre_accum_loop(monkeypatch, accum_cfg):
+    loop, model, x, t = _accum_env(monkeypatch, n_img=12)
+    fake = loop.compute_losses
+    batches = _batches(x, t, [4, 4, 4])
+    ref = copy.deepcopy(model)
+    opt_ref = torch.optim.AdamW(ref.parameters(), lr=1e-2, weight_decay=1e-4)
+    _reference_loop_pre_accum(ref, batches, opt_ref, fake)
+    new = copy.deepcopy(model)
+    opt_new = torch.optim.AdamW(new.parameters(), lr=1e-2, weight_decay=1e-4)
+    loop.train_one_epoch(new, batches, opt_new, None, {"train": {"amp": False, **accum_cfg}},
+                         torch.device("cpu"), 0)
+    for pr, pn in zip(ref.parameters(), new.parameters()):
+        assert torch.equal(pr, pn)
+    assert not torch.equal(ref[0].weight, model[0].weight)
+
+
+def test_fit_summary_has_train_seconds_and_n_params(monkeypatch, tmp_path):
+    summary, _, _ = _scripted_fit(monkeypatch, tmp_path, [0.3, 0.4], select_from=0, epochs_max=2, patience=30)
+    assert summary["n_params"] == 1  # _Tiny has a single 1-element parameter
+    assert isinstance(summary["train_seconds"], float) and summary["train_seconds"] >= 0.0
+    on_disk = json.loads((tmp_path / "run" / "summary.json").read_text())
+    assert on_disk["n_params"] == 1 and on_disk["train_seconds"] == summary["train_seconds"]
