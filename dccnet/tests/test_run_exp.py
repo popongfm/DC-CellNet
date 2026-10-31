@@ -97,6 +97,33 @@ def test_runner_order_and_families(tmp_path):
     assert f"--split {tmp_path}/data/splits/pooled.json" in dp
 
 
+def test_runner_call_sequence_and_no_empty_args(tmp_path):
+    env = _setup(tmp_path)
+    r = _run(env, EXP_ARMS="d_both", EXP_SEEDS="0")
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = _calls(tmp_path)
+    kinds = [c.split()[0] + (":sweep" if "--sweep-thr" in c.split() else "") for c in calls]
+    assert kinds == ["train.py", "predict.py", "evaluate.py:sweep", "predict.py", "evaluate.py"]
+    assert "--subset val" in calls[1] and "--subset test" in calls[3]
+    for c in calls:  # unset EXP_*_ARGS must not leak empty argv entries
+        assert "  " not in c and not c.endswith(" ")
+
+
+def test_runner_call_sequence_and_no_empty_args(tmp_path):
+    env = _setup(tmp_path)
+    r = _run(env, EXP_ARMS="d_both", EXP_SEEDS="0")
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = _calls(tmp_path)
+    kinds = []
+    for c in calls:
+        w = c.split()
+        kinds.append(w[0] + (":sweep" if "--sweep-thr" in w else ""))
+    assert kinds == ["train.py", "predict.py", "evaluate.py:sweep", "predict.py", "evaluate.py"]
+    assert "--subset val" in calls[1] and "--subset test" in calls[3]
+    for c in calls:  # unset EXP_*_ARGS must not leak empty argv entries
+        assert "  " not in c and not c.endswith(" ")
+
+
 def test_runner_skips_finished_and_renames_aborted(tmp_path):
     env = _setup(tmp_path)
     runs = tmp_path / "runs"

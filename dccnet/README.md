@@ -272,7 +272,7 @@ Setup (once, in the dccnet conda env, from `C:\Research\dccnet`):
 
 `pip install ultralytics` takes whatever version pip resolves today; copy the `Version:` line of `pip show ultralytics` into your notes / the chat so the report can state it. The YOLO arm exports the split to `data\yolo_p3b_<split>\` (labels taken from the split JSON in our class order 0 RBC, 1 WBC, 2 Platelets); it never touches `data\yolo_pooled\`.
 
-Smoke test (all 5 arms, pooled, seed 0, 1 epoch each; a few minutes, separate runs dir):
+Smoke test (all 5 arms, pooled, seed 0, 1 epoch each; roughly 30-60 min, separate runs dir):
 
     set EXP_SEEDS=0
     set EXP_TRAIN_ARGS=--epochs-max 1
@@ -289,7 +289,7 @@ Then one extra DC-CellNet run to exercise AMP plus gradient accumulation on CUDA
 
 Check that every `runs_smoke_p3b\p3b_pooled_*_s0` has `summary_test.json`, and tell Claude if anything failed. Reset the variables before the real run (`set EXP_ARMS=`, `set EXP_SEEDS=`, `set EXP_TRAIN_ARGS=`, `set EXP_RUNS_DIR=`).
 
-Out of memory: never shrink the effective batch. Use `set EXP_TRAIN_ARGS=--batch 4 --accum-steps 2` for the DC-CellNet arms and FRCNN (YOLO keeps its effective batch through Ultralytics `nbs`, so only `--batch 4` applies to it); run the arm families separately via `EXP_ARMS` if the flags must differ.
+Out of memory: never shrink the effective batch (the runner skips finished runs, so re-running with only the OOM'd arm is safe). DC-CellNet arms: `set EXP_ARMS=d_both d_sigma circlenet` and `set EXP_TRAIN_ARGS=--batch 4 --accum-steps 2`. Faster R-CNN (protocol batch is already 4): `set EXP_ARMS=frcnn` as its own pass with `set EXP_TRAIN_ARGS=--batch 2 --accum-steps 2` (not `--batch 4 --accum-steps 2`, which would double the effective batch). YOLO: `set EXP_ARMS=yolo26m` and lower `--batch` only (e.g. `--batch 4`); Ultralytics `nbs` keeps the effective batch.
 
 Real run, stage 1: pooled split, 5 arms x 3 seeds = 15 runs:
 
@@ -309,6 +309,8 @@ Stage 2: the four leave-one-source-out folds (60 more runs):
 
 Send the results back (Git Bash or WSL, from `dccnet`):
 
-    tar czf runs_p3b.tgz data/splits/pooled.json data/splits/loso_*.json runs/p3b_*/{summary.json,summary_test.json,sweep_val.json,preds_test.json,metrics.jsonl} reports/p3b*.md
+    tar czf runs_p3b.tgz --ignore-failed-read --exclude="*_aborted_*" data/splits/pooled.json data/splits/loso_*.json runs/p3b_*/{summary.json,summary_test.json,sweep_val.json,preds_test.json,metrics.jsonl,results.csv} reports/p3b*.md
+
+YOLO runs have no `metrics.jsonl` (they write `results.csv`) and DC-CellNet/FRCNN runs have no `results.csv`; `--ignore-failed-read` turns those missing-file errors into warnings, and `--exclude` keeps renamed `*_aborted_*` run dirs out of the archive.
 
 ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26m roughly 1-1.5 h, Faster R-CNN roughly 2-3 h; stage 1 is about 25-35 h, stage 2 about 4x that. The estimate is rough; the smoke run's per-epoch times give the real figure.
