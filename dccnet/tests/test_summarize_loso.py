@@ -46,7 +46,7 @@ def _preds(samples, data_root, drop_middle, score=0.9, hidden_score=0.4):
     return out
 
 
-def _write_run(runs, split, arm, seed, preds, m_ap=0.5, thr=0.5, train_seconds=100.0, n_params=1000):
+def _write_run(runs, split, arm, seed, preds, m_ap=0.5, thr=0.5, train_seconds=100.0, n_params=1000, rbc_mae=0.0):
     d = runs / f"p3b_{split}_{arm}_s{seed}"
     d.mkdir(parents=True)
     summary = {"exp": d.name, "seed": seed, "best_epoch": 20, "select_from_epoch": 0}
@@ -59,7 +59,7 @@ def _write_run(runs, split, arm, seed, preds, m_ap=0.5, thr=0.5, train_seconds=1
     test = {"coco": {"mAP50_95": m_ap, "mAP50": m_ap + 0.1,
                      "per_class": {"RBC": m_ap + 0.1, "WBC": None, "Platelets": None},
                      "per_class_50_95": {"RBC": m_ap, "WBC": None, "Platelets": None}},
-            "counting": {"MAE": {"RBC": 0.0, "WBC": 0.0, "Platelets": 0.0}}}
+            "counting": {"MAE": {"RBC": rbc_mae, "WBC": 0.0, "Platelets": 0.0}}}
     (d / "summary_test.json").write_text(json.dumps(test))
     (d / "preds_test.json").write_text(json.dumps(preds))
     return d
@@ -87,7 +87,7 @@ def _fill(w, splits=None, arms=ARMS, seeds=SEEDS, cand_map=None):
                 if arm == "d_both":
                     m = cand_map(split, seed) if cand_map else 0.6
                 _write_run(w["runs"], split, arm, seed, _preds(samples, w["data_root"], drop_middle=arm != "d_both"),
-                           m_ap=m, train_seconds=100.0 + seed)
+                           m_ap=m, train_seconds=100.0 + seed, rbc_mae=0.0 if arm == "d_both" else 1.0)
 
 
 def _summ(w, **kw):
@@ -132,7 +132,7 @@ def test_loso_pooled_gate_concatenates_folds(world):
     assert p["verdict"] == "GO" and p["n_images"] == POOLED_N
 
 
-def test_loso_gate_nogo_when_one_fold_worse_is_not_averaged_away(world):
+def test_loso_gate_nogo_when_baseline_ties_candidate_on_every_fold(world):
     _fill(world)
     # circlenet perfect on every fold and seed too -> no improvement -> NO-GO (not GO)
     for split in ("loso_BCCD", "loso_BCDD", "loso_PBC", "loso_Raabin"):
@@ -256,9 +256,10 @@ def test_split_table_and_efficiency(world):
     assert t["mae_class"]["RBC"]["mean"] == pytest.approx(1.0)  # recomputed: middle cell missed
     assert t["recall"][2]["mean"] == pytest.approx(0.0) and t["recall"][1]["mean"] == pytest.approx(1.0)
     e = res["efficiency"]
-    assert e["d_both"]["n_params"] == 1000 and e["d_both"]["train_seconds_mean"] == pytest.approx(101.0)
+    assert e["d_both"]["n_params"] == 1000
+    assert e["d_both"]["train_seconds"] == {"pooled": {"mean": pytest.approx(101.0), "n": 3}}
     assert e["d_both"]["fps"] == pytest.approx(25.0) and e["circlenet"]["fps"] is None
-    assert e["frcnn"]["train_seconds_mean"] == pytest.approx(101.5)  # seeds 1, 2 only
+    assert e["frcnn"]["train_seconds"]["pooled"] == {"mean": pytest.approx(101.5), "n": 2}  # seeds 1, 2 only
     md = summarize_loso.render(res)
     assert "| d_both |" in md
 
@@ -268,3 +269,76 @@ def test_partial_loso_splits_inconclusive(world):
     res = _summ(world, splits=("pooled", "loso_BCCD"))
     assert res["comparisons"]["loso"]["circlenet"]["verdict"] == "INCONCLUSIVE"
     assert res["c2"]["d_both"]["loso_mean"] is None
+
+
+def test_loso_fold_alignment_and_order(world, monkeypatch):
+    _fill(world)
+    # circlenet perfect on every fold except PBC (5 images, middle cell missed -> |err| 1 per image)
+    for split in ("loso_BCCD", "loso_BCDD", "loso_Raabin"):
+        for seed in SEEDS:
+            d = world["runs"] / f"p3b_{split}_circlenet_s{seed}"
+            (d / "preds_test.json").write_text(json.dumps(_preds(world["tests"][split], world["data_root"], False)))
+    seen = []
+    real = summarize_loso.gate
+
+    def spy(cand, base, *a, **kw):
+        seen.append((cand, base))
+        return real(cand, base, *a, **kw)
+
+    monkeypatch.setattr(summarize_loso, "gate", spy)
+    res = _summ(world)
+    g = res["comparisons"]["loso"]["circlenet"]
+    assert g["n_images"] == 14
+    assert g["candidate_mae"] == pytest.approx(0.0) and g["baseline_mae"] == pytest.approx(5 / 14)
+    assert g["per_seed_diff"] == pytest.approx({0: -5 / 14, 1: -5 / 14, 2: -5 / 14})
+    assert g["baseline_recall_ge2"] == pytest.approx(9 / 14)  # 1 bin-2 cell per image, 5 of 14 missed
+    expected = [0.0] * 3 + [0.0] * 4 + [1.0] * 5 + [0.0] * 2  # BCCD, BCDD, PBC, Raabin
+    # gate calls: (pooled circlenet, LOSO circlenet, pooled frcnn, LOSO frcnn); frcnn misses everywhere
+    loso_calls = [b for c, b in seen if len(b[0]["abs_err"]) == 14]
+    assert len(loso_calls) == 2
+    assert all(list(loso_calls[0][s]["abs_err"]) == expected for s in SEEDS)
+    assert all(list(loso_calls[1][s]["abs_err"]) == [1.0] * 14 for s in SEEDS)
+    assert g["verdict"] == "GO"
+
+
+def test_null_best_epoch_is_inconclusive(world):
+    _fill(world)
+    sm = world["runs"] / "p3b_pooled_circlenet_s1" / "summary.json"
+    s = json.loads(sm.read_text())
+    s["best_epoch"] = None
+    sm.write_text(json.dumps(s))
+    res = _summ(world)
+    g = res["comparisons"]["pooled"]["circlenet"]
+    assert g["verdict"] == "INCONCLUSIVE"
+    assert any("p3b_pooled_circlenet_s1" in why and "best_epoch" in why for why in g["reasons"])
+    assert res["stage1"] == "INCONCLUSIVE"
+    assert res["c2"]["circlenet"]["pooled"] is None and res["c2"]["circlenet"]["delta"] is None
+
+
+def test_null_map_blanks_c2_cell(world):
+    _fill(world)
+    st = world["runs"] / "p3b_loso_BCDD_frcnn_s2" / "summary_test.json"
+    t = json.loads(st.read_text())
+    t["coco"]["mAP50_95"] = None
+    st.write_text(json.dumps(t))
+    res = _summ(world)
+    c = res["c2"]["frcnn"]
+    assert c["folds"]["loso_BCDD"] is None and c["loso_mean"] is None and c["delta"] is None
+    assert c["pooled"] == pytest.approx(0.4)
+    assert any("p3b_loso_BCDD_frcnn_s2" in w for w in res["warnings"])
+
+
+def test_summary_mae_mismatch_warns(world):
+    _fill(world, splits=("pooled",))
+    st = world["runs"] / "p3b_pooled_frcnn_s0" / "summary_test.json"
+    t = json.loads(st.read_text())
+    t["counting"]["MAE"]["RBC"] = 0.5
+    st.write_text(json.dumps(t))
+    res = _summ(world, splits=("pooled",))
+    mism = [w for w in res["warnings"] if "recomputed RBC MAE" in w]
+    assert len(mism) == 1 and "p3b_pooled_frcnn_s0" in mism[0]
+
+
+def test_empty_seeds_rejected(world):
+    r = _cli(world, ["--seeds", ","])
+    assert r.returncode == 2 and "--seeds" in r.stderr

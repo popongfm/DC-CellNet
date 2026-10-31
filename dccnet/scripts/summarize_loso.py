@@ -19,7 +19,7 @@ Report:
      pooled -- per seed the per-image arrays of the 4 folds are concatenated (BCCD, BCDD, PBC, Raabin). Verdict
      GO / NO-GO, or INCONCLUSIVE when any requested seed or fold is missing for either arm, or a run's predictions
      name images outside the split's test subset (the offending keys are listed);
-  4. efficiency per arm: n_params, mean train_seconds (summary.json), FPS from ``<run>/latency.json`` if present;
+  4. efficiency per arm: n_params, mean train_seconds per split (summary.json), FPS from ``<run>/latency.json`` if present;
   5. stage-1 line ``pooled stop/go: d_both vs circlenet = <verdict>`` (spec section 3.2), whatever ``--candidate``.
 The exit code is always 0.
 """
@@ -120,6 +120,13 @@ def load_split(runs_dir: Path, prefix: str, split: str, data_root: Path, arms, s
                        else f"unreadable: {e}")
                 problem(arm, seed, f"{name}: incomplete run skipped ({why})")
                 continue
+            if r["best_epoch"] is None or r["best_epoch"] < r["select_from"]:
+                problem(arm, seed, f"{name}: invalid best_epoch {r['best_epoch']} (select_from_epoch "
+                                   f"{r['select_from']}); run excluded")
+                continue
+            if r["summary_mae"] is not None and abs(r["summary_mae"] - r["mae"]) > 1e-6:
+                warnings.append(f"{name}: recomputed RBC MAE {r['mae']:.4f} != summary_test.json "
+                                f"{r['summary_mae']:.4f}")
             ce = count_errors(samples, preds, r["thr"], data_root)
             coco = test.get("coco") or {}
             r.update({"dir": d, "map50": coco.get("mAP50"), "ap_class": coco.get("per_class_50_95") or {},
@@ -202,10 +209,15 @@ def summarize(runs_dir: Path, prefix: str, data_root: Path, splits=SPLITS, arms=
             if runs:
                 tables[sp][arm] = _table_row(runs, data[sp]["samples"], data_root, map_ci_n, ci_seed, f"{sp} {arm}")
 
-    def split_map(sp, arm):  # seed mean, only when every requested seed is present
+    def split_map(sp, arm):  # seed mean, only when every requested seed is present with a non-null mAP
         if sp not in data or _missing(data[sp], arm, seeds) or not seeds:
             return None
-        return _ms([r["map"] for r in data[sp]["runs"][arm].values()])["mean"]
+        runs = data[sp]["runs"][arm]
+        null = [runs[s]["name"] for s in seeds if runs[s]["map"] is None]
+        if null:
+            warnings.append(f"C2 {arm} {sp}: blank, no mAP50_95 in summary_test.json of {null}")
+            return None
+        return _ms([runs[s]["map"] for s in seeds])["mean"]
 
     c2 = {}
     for arm in arms:
@@ -235,13 +247,16 @@ def summarize(runs_dir: Path, prefix: str, data_root: Path, splits=SPLITS, arms=
     efficiency = {}
     for arm in arms:
         runs = [data[sp]["runs"][arm][s] for sp in splits for s in data[sp]["runs"].get(arm, {})]
+        train_s = {}
+        for sp in splits:
+            t = [r["train_seconds"] for r in data[sp]["runs"].get(arm, {}).values() if r["train_seconds"] is not None]
+            train_s[sp] = {"mean": float(np.mean(t)) if t else None, "n": len(t)}
         n_params = sorted({r["n_params"] for r in runs if r["n_params"] is not None})
         if len(n_params) > 1:
             warnings.append(f"{arm}: n_params differs between runs {n_params}")
-        ts = [r["train_seconds"] for r in runs if r["train_seconds"] is not None]
         fps = [r["fps"] for r in runs if r["fps"] is not None]
         efficiency[arm] = {"n_params": n_params[0] if len(n_params) == 1 else (n_params or None),
-                           "train_seconds_mean": float(np.mean(ts)) if ts else None, "n_runs_timed": len(ts),
+                           "train_seconds": train_s,
                            "fps": float(np.mean(fps)) if fps else None}
 
     return {"prefix": prefix, "splits": splits, "arms": arms, "candidate": candidate, "seeds": seeds,
@@ -337,12 +352,16 @@ def render(res: dict) -> str:
             L.append(_cmp_row(label, cand, base, g))
     if not res["comparisons"]["loso"]:
         L += ["", "LOSO comparisons not run (no LOSO split in --splits)."]
-    L += ["", "## 4. Efficiency", "", "| arm | n_params | mean train_seconds | runs timed | inference FPS |",
-          "|---|---|---|---|---|"]
+    L += ["", "## 4. Efficiency", "",
+          "Mean train_seconds per split over that split's seeds (n runs timed); splits are not mixed because their "
+          "train sets differ in size.", "",
+          "| arm | n_params | " + " | ".join(f"train_seconds {sp}" for sp in res["splits"]) + " | inference FPS |",
+          "|" + "---|" * (3 + len(res["splits"]))]
     for arm in res["arms"]:
         e = res["efficiency"][arm]
-        L.append(f"| {arm} | {'' if e['n_params'] is None else e['n_params']} | {_blank(e['train_seconds_mean'], 0)} | "
-                 f"{e['n_runs_timed']} | {_blank(e['fps'], 1)} |")
+        ts = " | ".join(f"{_blank(e['train_seconds'][sp]['mean'], 0)} (n={e['train_seconds'][sp]['n']})"
+                        for sp in res["splits"])
+        L.append(f"| {arm} | {'' if e['n_params'] is None else e['n_params']} | {ts} | {_blank(e['fps'], 1)} |")
     L += ["", "FPS only from `<run>/latency.json` (`fps`); blank otherwise.", "", "## Verdicts", "",
           f"- **{stage1_line(res)}**"]
     for scope, label in (("pooled", "pooled"), ("loso", "LOSO pooled")):
@@ -387,6 +406,8 @@ def main(argv=None) -> int:
     ap.add_argument("--map-ci-n", type=int, default=1000, help="image-bootstrap draws for the mAP CI; 0 disables")
     ap.add_argument("--n-boot", type=int, default=1000, help="paired-bootstrap draws for the comparisons")
     args = ap.parse_args(argv)
+    if not _csv(args.seeds):
+        ap.error("--seeds must name at least one seed")
 
     res = summarize(args.runs_dir, args.prefix, args.data_root, _csv(args.splits), _csv(args.arms), args.candidate,
                     [int(x) for x in _csv(args.seeds)], args.map_ci_n, args.n_boot)

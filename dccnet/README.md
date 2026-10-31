@@ -311,7 +311,7 @@ Each summarize command writes the markdown report plus the same numbers as `.jso
 
 Send the results back (Git Bash or WSL, from `dccnet`):
 
-    tar czf runs_p3b.tgz --ignore-failed-read --exclude="*_aborted_*" data/splits/pooled.json data/splits/loso_*.json runs/p3b_*/{summary.json,summary_test.json,sweep_val.json,preds_test.json,metrics.jsonl,results.csv} reports/p3b*.md
+    tar czf runs_p3b.tgz --ignore-failed-read --exclude="*_aborted_*" data/splits/pooled.json data/splits/loso_*.json runs/p3b_*/{summary.json,summary_test.json,sweep_val.json,preds_test.json,metrics.jsonl,results.csv} reports/p3b*.md reports/p3b*.json
 
 YOLO runs have no `metrics.jsonl` (they write `results.csv`) and DC-CellNet/FRCNN runs have no `results.csv`; `--ignore-failed-read` turns those missing-file errors into warnings, and `--exclude` keeps renamed `*_aborted_*` run dirs out of the archive.
 
