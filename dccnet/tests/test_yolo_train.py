@@ -106,3 +106,54 @@ def test_best_epoch_from_ckpt_minus_one_without_csv_raises(tmp_path):
         mod.best_epoch_from_ckpt(pt)
     with pytest.raises(ValueError):
         mod.best_epoch_from_ckpt(pt, tmp_path / "nope.csv")
+
+
+def test_main_wiring_with_stub_ultralytics(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    mod = _load_module()
+    data_root = tmp_path / "data"
+    (data_root / "images").mkdir(parents=True)
+    samples = []
+    for i in range(2):
+        p = data_root / "images" / f"im{i}.png"
+        Image.new("RGB", (100, 80)).save(p)
+        samples.append({"image": f"images/im{i}.png", "source": "PBC", "width": 100, "height": 80,
+                        "boxes": [[10, 20, 50, 60]], "labels": [1]})
+    (data_root / "splits").mkdir()
+    (data_root / "splits" / "pooled.json").write_text(
+        json.dumps({"train": samples[:1], "val": samples[1:], "test": []}))
+    old = data_root / "yolo_pooled"
+    old.mkdir()
+    (old / "data_pooled.yaml").write_text("keep")
+
+    calls = {}
+
+    class FakeYOLO:
+        def __init__(self, model):
+            calls["model"] = model
+            self.model = torch.nn.Linear(2, 3)
+
+        def train(self, **kw):
+            calls.update(kw)
+            run = Path(kw["project"]) / kw["name"]
+            (run / "weights").mkdir(parents=True, exist_ok=True)
+            (run / "results.csv").write_text("epoch,metrics/mAP50-95(B)\n0,0.2\n1,0.4\n")
+            torch.save({"epoch": -1}, run / "weights" / "best.pt")
+
+    fake = types.ModuleType("ultralytics")
+    fake.YOLO = FakeYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", fake)
+    monkeypatch.chdir(tmp_path)
+    assert mod.main(["--split", "splits/pooled.json", "--data-root", str(data_root), "--runs-dir", "runs",
+                     "--run-name", "p3b_pooled_yolo26m_s2", "--seed", "2", "--epochs-max", "5",
+                     "--patience", "3", "--batch", "4", "--imgsz", "320"]) == 0
+    assert Path(calls["project"]).is_absolute() and calls["project"] == str((tmp_path / "runs").resolve())
+    assert calls["name"] == "p3b_pooled_yolo26m_s2" and calls["exist_ok"] is True
+    assert (calls["epochs"], calls["patience"], calls["batch"], calls["imgsz"], calls["seed"]) == (5, 3, 4, 320, 2)
+    assert calls["deterministic"] is True
+    assert Path(calls["data"]) == (data_root / "yolo_p3b_pooled" / "data.yaml").resolve()
+    assert (old / "data_pooled.yaml").read_text() == "keep"
+    s = json.loads((tmp_path / "runs" / "p3b_pooled_yolo26m_s2" / "summary.json").read_text())
+    assert s["best_epoch"] == 1 and s["n_params"] == 9 and s["epochs_run"] == 2

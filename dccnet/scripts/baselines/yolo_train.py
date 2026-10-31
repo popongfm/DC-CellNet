@@ -5,7 +5,8 @@ Usage:
         --runs-dir runs --run-name p3b_pooled_yolo26m_s0 --seed 0
 
 --split is relative to --data-root. The split is exported (split-JSON labels, our class order)
-to <data-root>/yolo_<split stem>/ (reused if data.yaml exists). Weights: <run>/weights/best.pt.
+to <data-root>/yolo_p3b_<split stem>/ (reused if data.yaml exists;
+never yolo_pooled, which prepare_data owns). Weights: <run>/weights/best.pt.
 """
 from __future__ import annotations
 
@@ -95,7 +96,7 @@ def main(argv=None) -> int:
     from ultralytics import YOLO  # lazy: not installed everywhere
 
     split_path = args.data_root / args.split
-    export_dir = args.data_root / f"yolo_{split_path.stem}"
+    export_dir = args.data_root / f"yolo_p3b_{split_path.stem}"
     yaml_path = export_dir / "data.yaml"
     if not yaml_path.exists():
         yaml_path = write_yolo(read_split(split_path, args.data_root), export_dir)
