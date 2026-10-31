@@ -42,7 +42,18 @@ def main(argv=None) -> int:
     rdir = root / a.relabel_dir
     samples = read_split(root / a.split, root)[a.subset]
     mpath = rdir / "prelabel_manifest.json"
-    manifest = json.loads(mpath.read_text(encoding="utf-8")) if mpath.is_file() else {}
+    stems: dict[str, str] = {}
+    for s in samples:
+        st = Path(s.image_path).stem
+        if st in stems:
+            print(f"error: duplicate image stem {st!r}: {stems[st]} and {image_key(s, root)}", file=sys.stderr)
+            return 2
+        stems[st] = image_key(s, root)
+    if mpath.is_file():
+        manifest = json.loads(mpath.read_text(encoding="utf-8"))
+    else:
+        manifest = {}
+        print(f"warning: {mpath} missing; progress/stats cannot compare against the pre-label", file=sys.stderr)
 
     if a.progress:
         changed = missing = 0
@@ -77,7 +88,8 @@ def main(argv=None) -> int:
             print("  " + e, file=sys.stderr)
         return 1
 
-    per_image, tot = {}, {"n_images": len(samples), "n_boxes": 0, "kept": 0, "added": 0, "removed": 0}
+    per_image, tot = {}, {"n_images": len(samples), "n_boxes": 0, "kept": 0, "added": 0, "removed": 0,
+                      "n_prelabel_added": 0, "yolo_origin_kept": 0}
     warned = False
     for s, n in zip(samples, new_samples):
         stem = Path(s.image_path).stem
@@ -92,6 +104,8 @@ def main(argv=None) -> int:
         per_image[stem] = {"image": image_key(s, root), "n_boxes": int(len(n.boxes)), "vs_original": cmp,
                            "n_prelabel_added": None if ab is None else len(ab), "yolo_origin_kept": okept}
         tot["n_boxes"] += len(n.boxes)
+        for k, v in (("n_prelabel_added", None if ab is None else len(ab)), ("yolo_origin_kept", okept)):
+            tot[k] = None if v is None or tot[k] is None else tot[k] + v
         for k in ("kept", "added", "removed"):
             tot[k] += cmp[k]
     if warned:

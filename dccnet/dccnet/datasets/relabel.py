@@ -88,11 +88,10 @@ def from_yolo_lines(lines, width: int, height: int):
 
 
 def normalize_label_text(text: str) -> str:
-    """Newline-normalise (CRLF / CR -> LF) and make a non-empty text end with exactly the C1 trailing newline."""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    if text and not text.endswith("\n"):
-        text += "\n"
-    return text
+    """Canonical form matching what from_yolo_lines ignores: CRLF/CR -> LF, strip each line, drop blank lines,
+    one trailing LF when non-empty (identical to the C1 export text for an unchanged file)."""
+    lines = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return "".join(ln + "\n" for ln in lines if ln)
 
 
 def compare_label_sets(old_boxes, old_labels, new_boxes, new_labels, iou: float = 0.5) -> dict:

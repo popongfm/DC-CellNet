@@ -247,3 +247,61 @@ def test_prelabel_writes_lf_bytes_and_added_boxes(tmp_path):
     ab = man["BloodImage_00001"]["added_boxes"]
     assert len(ab) == 2 and len(ab[0]) == 5 and ab[0][4] == 0
     assert man["BloodImage_00000"]["added_boxes"] == [[200.0, 200.0, 240.0, 240.0, 0]]
+
+
+def _edited(root):
+    r = _import(root, "--progress")
+    assert r.returncode == 0, r.stderr
+    return r.stdout.split()[0]
+
+
+def test_progress_ignores_what_parser_ignores(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    p1, p0 = out / "labels" / "BloodImage_00001.txt", out / "labels" / "BloodImage_00000.txt"
+    orig1, orig0 = p1.read_text(), p0.read_text()
+    p1.write_text(orig1 + "\n\n", newline="\n")  # (a) blank lines
+    assert _edited(root) == "0/2"
+    p1.write_text("".join(ln + "   \n" for ln in orig1.splitlines()), newline="\n")  # (b) trailing spaces
+    assert _edited(root) == "0/2"
+    p1.write_text(orig1)
+    p0.write_text("")
+    assert _edited(root) == "1/2"  # emptying a file with boxes is an edit
+    p0.write_text("\n")  # (c) "\n" is the same as the empty file
+    assert _edited(root) == "1/2"
+    p0.write_text(orig0, newline="\n")
+    assert _edited(root) == "0/2"
+    p1.write_text(orig1.replace("0.", "0.9", 1), newline="\n")  # (d) real coordinate change
+    assert _edited(root) == "1/2"
+
+
+def test_normalize_empty_equals_newline_only():
+    from dccnet.datasets.relabel import normalize_label_text
+    assert normalize_label_text("\n") == normalize_label_text("") == ""
+    assert normalize_label_text("0 1 2 3 4  \r\n\r\n") == "0 1 2 3 4\n"
+
+
+def test_import_missing_manifest_warns_and_totals(tmp_path):
+    root = _setup(tmp_path)
+    out = _prelabel(root, tmp_path)
+    st_ok = _import(root)
+    t = json.loads((out / "import_stats.json").read_text())["totals"]
+    assert t["n_prelabel_added"] == 3 and t["yolo_origin_kept"] == 3
+    (out / "prelabel_manifest.json").unlink()
+    for extra in (("--progress",), ()):
+        r = _import(root, *extra)
+        assert "manifest" in r.stderr and "missing" in r.stderr
+    assert json.loads((out / "import_stats.json").read_text())["totals"]["yolo_origin_kept"] is None
+    assert st_ok.returncode == 0
+
+
+def test_import_rejects_duplicate_stems(tmp_path):
+    root = _setup(tmp_path)
+    _prelabel(root, tmp_path)
+    sp = json.loads((root / "splits" / "overlap_bccd.json").read_text())
+    dup = dict(sp["test"][0])
+    dup["image"] = "bccd_full/other/" + Path(dup["image"]).name
+    sp["test"].append(dup)
+    (root / "splits" / "dup.json").write_text(json.dumps(sp))
+    r = _import(root, "--split", "splits/dup.json")
+    assert r.returncode != 0 and "duplicate" in r.stderr
