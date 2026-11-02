@@ -20,3 +20,25 @@ Report: `results/p3b/p3b_stage1.md` (made with `--map-ci-n 0`; the device split 
    - RBC MAE changes by less than 0.1.
 2. **mAP50-95 gap to YOLO/FRCNN is mostly representation.** TXL GT boxes are rectangles (RBCs cut by the border, elongated cells). The best square box fitted to the GT has mean IoU 0.835 for RBC, and 26% of RBCs cannot reach IoU 0.75. A circle detector is therefore capped at high IoU thresholds whatever the target rule. Compare AP50 and count, or add a w/h head.
 3. **Little real overlap in TXL** (the risk in spec §5): bins 2+3 recall is ≈ 0.93–0.97 for every arm. The overlap claim has to be tested on BCCD (P3c).
+
+## Stage 1b — re-decode with `--nms center` (ratio 0.2), same checkpoints, threshold re-swept on val
+
+| arm | mAP50-95 | mAP50 | RBC MAE | WBC MAE |
+|---|---|---|---|---|
+| d_both | 0.672 | 0.971 | **0.90** | 0.04 |
+| d_sigma | 0.671 | 0.975 | 0.96 | 0.03 |
+| circlenet | 0.676 | 0.974 | 0.96 | 0.03 |
+| repel | 0.676 | 0.969 | 1.71 | 0.09 |
+| yolo26m | 0.860 | 0.976 | 1.21 | 0.03 |
+| frcnn | 0.832 | 0.983 | 0.83 | 0.02 |
+
+Paired gate (RBC |count err|):
+- d_both vs circlenet: **NO-GO**. d_both is lower on every seed, but the CI [−0.146, 0.042] crosses 0 and recall in bins 2+3 ties.
+- d_both vs d_sigma: NO-GO. Lower on every seed, recall bins 2+3 higher, CI [−0.167, 0.024].
+- d_both vs yolo26m: **GO**. CI [−0.497, −0.127], every seed.
+- d_both vs repel: **GO**.
+- d_both vs frcnn: NO-GO. Statistical tie; frcnn is slightly better.
+
+The fixed decoder removes the WBC duplicates. Every DC-CellNet arm now matches YOLO/FRCNN on mAP50. The remaining mAP50-95 gap comes from the circle-to-box cap.
+
+The pooled gate is underpowered at 126 test images. The LOSO stage pools 1,260 held-out images.
