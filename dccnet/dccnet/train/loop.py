@@ -214,6 +214,7 @@ def _decode_kwargs(cfg: dict, score_thr: float) -> dict:
         "window": int(d.get("window", cfg["loss"]["cc"]["window"])),
         "low_thr": float(d.get("low_thr", 0.1)),
         "nms": d.get("nms", "none"),
+        "center_ratio": float(d.get("nms_center_ratio", 0.2)),
         "max_dets": PRED_MAX_DETS,
     }
 

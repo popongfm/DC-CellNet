@@ -326,6 +326,18 @@ YOLO runs have no `metrics.jsonl` (they write `results.csv`) and DC-CellNet/FRCN
 
 ETA (RTX 5060 Ti): DC-CellNet arms roughly 1.5-2 h per run at 150 epochs, YOLO26m roughly 1-1.5 h, Faster R-CNN roughly 2-3 h; stage 1 is about 30-40 h, stage 2 about 4x that. The estimate is rough; the smoke run's per-epoch times give the real figure.
 
+### P3b stage 1b — re-decode with duplicate-peak merge (no retraining)
+
+Stage 1 showed about two detections per WBC for every DC-CellNet arm: a 3x3 max-pool leaves near-tie peaks on large cells. `--nms center` merges a same-class peak whose center lies closer than `0.2 x` the larger radius to a higher-scoring peak, so genuinely overlapping cells are kept. The ratio 0.2 was picked while diagnosing the stage-1 seed-0 test predictions (state this in the paper); the threshold is still swept on val. The runner re-predicts from the existing `best.pt` into a fresh runs dir:
+
+    python scripts/seed_redecode.py --src runs --dst runs_c --prefix p3b --splits pooled
+    set EXP_RUNS_DIR=runs_c
+    set EXP_SPLITS=pooled
+    set EXP_DCC_PREDICT_ARGS=--nms center
+    scripts\run_exp.bat
+
+`seed_redecode.py` copies only the training outputs of the DC-CellNet runs (so the runner skips training and redoes predict val, sweep, predict test and evaluate) and copies the finished YOLO/FRCNN runs whole (the runner skips them). `EXP_DCC_PREDICT_ARGS` reaches DC-CellNet predict only. Expect 12 re-predictions of a few minutes each. Then tar `runs_c` the same way as above (replace `runs/` with `runs_c/`) and send it. Keep `EXP_DCC_PREDICT_ARGS=--nms center` set for every later DC-CellNet predict (stage 2 and P3c extras), so all reported numbers use one decoder.
+
 ## P3c — BCCD overlap relabel
 
 1. Predict on the 204-image overlap set with the pooled YOLO26m weights: `python scripts\baselines\yolo_predict.py --weights <path to the pooled best.pt> --split data\splits\overlap_bccd.json --subset test --data-root data --conf 0.001 --out <path>\preds_bccd.json`.

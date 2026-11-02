@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from dccnet.datasets.geometry import circle_iou
 
-_NMS_MODES = ("none", "circle", "box")
+_NMS_MODES = ("none", "circle", "box", "center")
 _NMS_IOU = 0.5
 
 
@@ -41,6 +41,26 @@ def _greedy_nms(circles: torch.Tensor, scores: torch.Tensor, mode: str) -> torch
             continue
         keep.append(i)
         suppressed |= iou[i] > _NMS_IOU
+    return order[torch.tensor(keep, dtype=torch.long)]
+
+
+def _center_suppress(circles: torch.Tensor, scores: torch.Tensor, ratio: float) -> torch.Tensor:
+    """Greedy same-class duplicate-peak merge: drop a peak whose center lies closer than
+    ``ratio * max(r_i, r_j)`` to a higher-scoring kept peak. Unlike IoU NMS it keeps genuinely
+    overlapping cells (centers further apart than a fraction of the radius) and only removes the
+    near-tie plateau peaks a 3x3 max-pool leaves on large cells. Returns kept indices."""
+    order = torch.argsort(scores, descending=True, stable=True)
+    c = circles[order]
+    d = torch.cdist(c[:, :2], c[:, :2])
+    rmax = torch.maximum(c[:, None, 2], c[None, :, 2])
+    close = d < ratio * rmax
+    suppressed = torch.zeros(len(c), dtype=torch.bool)
+    keep = []
+    for i in range(len(c)):
+        if suppressed[i]:
+            continue
+        keep.append(i)
+        suppressed |= close[i]
     return order[torch.tensor(keep, dtype=torch.long)]
 
 
@@ -89,11 +109,14 @@ def decode(
     low_thr: float = 0.1,
     nms: str = "none",
     max_dets: int = 1000,
+    center_ratio: float = 0.2,
 ) -> list[np.ndarray]:
     """Decode (B,C,H,W) heatmap + (B,1,H,W) log_r + (B,2,H,W) offset into per-image
     float32 arrays (M,5) of ``[cls, cx, cy, r, score]`` (input px), score-descending."""
     if nms not in _NMS_MODES:
         raise ValueError(f"nms must be one of {_NMS_MODES}, got {nms!r}")
+    if nms == "center" and not center_ratio > 0:
+        raise ValueError(f"center_ratio must be > 0, got {center_ratio!r}")
     if density_fill and density is None:
         raise ValueError("density_fill=True requires a density map")
 
@@ -126,7 +149,10 @@ def decode(
             for c in range(C):
                 idx = (cls_i == c).nonzero().squeeze(1)
                 if len(idx):
-                    kept.append(idx[_greedy_nms(circles[idx], scores[idx], nms)])
+                    if nms == "center":
+                        kept.append(idx[_center_suppress(circles[idx], scores[idx], float(center_ratio))])
+                    else:
+                        kept.append(idx[_greedy_nms(circles[idx], scores[idx], nms)])
             keep = torch.cat(kept)
             cls_i, scores, circles = cls_i[keep], scores[keep], circles[keep]
 

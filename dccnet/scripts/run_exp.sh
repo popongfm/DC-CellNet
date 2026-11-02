@@ -15,6 +15,7 @@
 #   EXP_EXTRA_SPLITS (unset; extra eval splits, e.g. "overlap_bccd bccd_overlap_v2")
 #   EXP_DEVICE (unset; --device for dccnet and frcnn scripts only, Ultralytics keeps its default 0)
 #   EXP_TRAIN_ARGS (unset; appended to every train command, e.g. "--epochs-max 1")  EXP_PREDICT_ARGS (unset)
+#   EXP_DCC_PREDICT_ARGS (unset; DC-CellNet predict only, e.g. "--nms center" for the duplicate-peak re-decode)
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,6 +34,8 @@ DEV=()
 TRAIN_ARGS=(${EXP_TRAIN_ARGS:-})
 # shellcheck disable=SC2206
 PRED_ARGS=(${EXP_PREDICT_ARGS:-})
+# shellcheck disable=SC2206
+DCC_PRED_ARGS=(${EXP_DCC_PREDICT_ARGS:-})  # DC-CellNet predict only, e.g. "--nms center"
 
 mkdir -p "$RUNS"
 LOG="$RUNS/exp_runner.log"
@@ -52,7 +55,7 @@ do_predict() {
   case "$family" in
     dccnet)
       "$PY" scripts/predict.py --run "$run" --split "$2" --subset "$1" --data-root "$DATA" \
-        --out "$3" ${DEV[@]+"${DEV[@]}"} ${PRED_ARGS[@]+"${PRED_ARGS[@]}"} ;;
+        --out "$3" ${DEV[@]+"${DEV[@]}"} ${PRED_ARGS[@]+"${PRED_ARGS[@]}"} ${DCC_PRED_ARGS[@]+"${DCC_PRED_ARGS[@]}"} ;;
     yolo)
       "$PY" scripts/baselines/yolo_predict.py --weights "$run/weights/best.pt" --split "$2" --subset "$1" \
         --data-root "$DATA" --out "$3" ${PRED_ARGS[@]+"${PRED_ARGS[@]}"} ;;

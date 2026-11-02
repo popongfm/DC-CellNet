@@ -139,3 +139,33 @@ def test_round_trip_stride_2():
         j = int(np.argmin(dist))
         assert dist[j] < 0.5
         assert abs(sel[j, 3] - r) / r < 0.05
+
+
+def test_center_suppression_merges_near_duplicate_peaks_only():
+    # two peaks 2 cells (8 px) apart on a large cell r=60: 8 < 0.2*60 -> one detection
+    hm = torch.zeros(1, 1, 32, 32)
+    hm[0, 0, 10, 10] = 0.9
+    hm[0, 0, 10, 12] = 0.85
+    # two overlapping small cells r=10, 16 px apart: 16 > 0.2*10 -> both kept
+    hm[0, 0, 24, 4] = 0.8
+    hm[0, 0, 24, 8] = 0.75
+    log_r = torch.full((1, 1, 32, 32), float(np.log(10.0)))
+    log_r[0, 0, 8:13, 8:15] = float(np.log(60.0))
+    offset = torch.zeros(1, 2, 32, 32)
+    out = decode(hm, log_r, offset, stride=4, nms="center", center_ratio=0.2)[0]
+    assert len(out) == 3
+    assert out[0, 4] == pytest.approx(0.9)
+    assert 0.85 not in [pytest.approx(s) for s in out[:, 4].tolist()]
+    # ratio uses the larger radius of the pair, and is class-wise
+    assert len(decode(hm, log_r, offset, stride=4, nms="center", center_ratio=0.01)[0]) == 4
+
+
+def test_center_suppression_class_wise_and_validates_ratio():
+    hm = torch.zeros(1, 2, 16, 16)
+    hm[0, 0, 4, 4] = 0.9
+    hm[0, 1, 4, 4] = 0.8
+    log_r = torch.full((1, 1, 16, 16), float(np.log(40.0)))
+    offset = torch.zeros(1, 2, 16, 16)
+    assert len(decode(hm, log_r, offset, nms="center")[0]) == 2
+    with pytest.raises(ValueError):
+        decode(hm, log_r, offset, nms="center", center_ratio=0.0)

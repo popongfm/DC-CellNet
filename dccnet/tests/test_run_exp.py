@@ -212,3 +212,13 @@ def test_runner_predict_failure_is_logged(tmp_path, script):
     r = _run(env, EXP_ARMS=arm, EXP_SEEDS="0", STUB_FAIL_ON=script)
     assert r.returncode != 0
     assert "FAILED" in (tmp_path / "runs" / "exp_runner.log").read_text()
+
+
+def test_runner_dcc_predict_args_reach_dccnet_only(tmp_path):
+    env = _setup(tmp_path)
+    r = _run(env, EXP_ARMS="d_both yolo26m frcnn", EXP_SEEDS="0", EXP_DCC_PREDICT_ARGS="--nms center")
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = _calls(tmp_path)
+    preds = [c for c in calls if c.split()[0] in ("predict.py", "yolo_predict.py", "frcnn_predict.py")]
+    assert all(("--nms center" in c) == c.startswith("predict.py") for c in preds)
+    assert sum(c.startswith("predict.py") for c in preds) == 2

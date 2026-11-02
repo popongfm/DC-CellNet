@@ -9,7 +9,7 @@ rem Extra eval splits (EXP_EXTRA_SPLITS): after each run's normal stage, also fo
 rem predict DATA\splits\x.json (subset test) to RUN\preds_x.json and evaluate at the run's best_thr to RUN\summary_x.json (skipped if present).
 rem Splits are never regenerated: a missing DATA\splits\split.json is a failure. Stops at the first failure.
 rem Environment variables: EXP_PYTHON EXP_DATA_ROOT EXP_RUNS_DIR EXP_CONFIG_DIR EXP_PREFIX EXP_SPLITS EXP_ARMS EXP_SEEDS
-rem EXP_DEVICE EXP_TRAIN_ARGS EXP_PREDICT_ARGS EXP_EXTRA_SPLITS  (same meaning and defaults as in run_exp.sh).
+rem EXP_DEVICE EXP_TRAIN_ARGS EXP_PREDICT_ARGS EXP_DCC_PREDICT_ARGS EXP_EXTRA_SPLITS  (same meaning and defaults as in run_exp.sh).
 setlocal EnableExtensions
 cd /d "%~dp0.."
 
@@ -132,7 +132,7 @@ exit /b 0
 :pred
 rem %1 = val or test; %2 = split json; %3 = output json; uses RUN FAM from :one (Ultralytics predict gets no --device: default 0)
 if "%FAM%"=="dccnet" (
-  "%EXP_PYTHON%" scripts\predict.py --run "%RUN%" --split %2 --subset %1 --data-root "%EXP_DATA_ROOT%" --out %3 %DEVARG% %EXP_PREDICT_ARGS% || exit /b 1
+  "%EXP_PYTHON%" scripts\predict.py --run "%RUN%" --split %2 --subset %1 --data-root "%EXP_DATA_ROOT%" --out %3 %DEVARG% %EXP_PREDICT_ARGS% %EXP_DCC_PREDICT_ARGS% || exit /b 1
 )
 if "%FAM%"=="yolo" (
   "%EXP_PYTHON%" scripts\baselines\yolo_predict.py --weights "%RUN%\weights\best.pt" --split %2 --subset %1 --data-root "%EXP_DATA_ROOT%" --out %3 %EXP_PREDICT_ARGS% || exit /b 1
