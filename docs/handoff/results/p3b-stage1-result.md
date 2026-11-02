@@ -42,3 +42,5 @@ Paired gate (RBC |count err|):
 The fixed decoder removes the WBC duplicates. Every DC-CellNet arm now matches YOLO/FRCNN on mAP50. The remaining mAP50-95 gap comes from the circle-to-box cap.
 
 The pooled gate is underpowered at 126 test images. The LOSO stage pools 1,260 held-out images.
+
+**Decision (Mickie, 2026-11-02):** continue to stage 2 (LOSO, all 6 arms) despite the formal pooled NO-GO. The pooled gate is underpowered and d_both wins every seed. Train into `runs_c` with `EXP_DCC_PREDICT_ARGS=--nms center` so every split uses one decoder. The deviation from spec §3.2 is disclosed in the paper.
